@@ -1,11 +1,11 @@
-# mingw64_sdl3_sample
+# sdl3_opengl_node2d
 
 # Project Overview
 
-mingw64_sdl3_sample is a minimal sample project demonstrating the use of SDL3, SDL_ttf, and FreeType to render text in a window using the "Kenney Mini" font. This project is designed for Windows using the MSYS2/MinGW-w64 environment, serving as a testbed for font rendering and SDL3-based applications. It provides a simple foundation for building a node2d editor graphical applications.
+sdl3_opengl_node2d is a minimal sample project demonstrating the use of SDL3, SDL_ttf, and FreeType to render text in a window using the "Kenney Mini" font. This project is designed for Windows using the MSYS2/MinGW-w64 environment, serving as a testbed for font rendering and SDL3-based applications. It provides a simple foundation for building a node2d editor graphical applications.
 
 ```
-mingw64_sdl3_sample/
+sdl3_opengl_node2d/
 ├── CMakeLists.txt
 ├── Kenney Mini.ttf
 ├── src/
