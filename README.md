@@ -2,7 +2,7 @@
 
 # Project Overview
 
-mingw64_sdl3_sample is a minimal sample project demonstrating the use of SDL3, SDL_ttf, and FreeType to render text in a window using the "Kenney Mini" font. This project is designed for Windows using the MSYS2/MinGW-w64 environment, serving as a testbed for font rendering and SDL3-based applications. It provides a simple foundation for building a terminal emulator or other graphical applications requiring text rendering.
+mingw64_sdl3_sample is a minimal sample project demonstrating the use of SDL3, SDL_ttf, and FreeType to render text in a window using the "Kenney Mini" font. This project is designed for Windows using the MSYS2/MinGW-w64 environment, serving as a testbed for font rendering and SDL3-based applications. It provides a simple foundation for building a node2d editor graphical applications.
 
 ```
 mingw64_sdl3_sample/
@@ -12,17 +12,26 @@ mingw64_sdl3_sample/
 │   └── main.c
 ```
 
-## Features
+## Features:
 
-- Renders text using the "Kenney Mini" font with SDL_ttf.
-- Creates a window with SDL3 to display centered text ("Hello, SDL_ttf!").
 - Configured for static linking of SDL3, SDL_ttf, and FreeType to avoid DLL dependencies.
 - Built using CMake and MinGW-w64 for cross-platform compatibility.
+
+- Node2D
+    - [x] dragging node 2d
+    - [x] Input (green) and output (red)
+    - [x] connect and disconnect
+        - left click on red and click to green to connect
+        - right click to disconnect on green
+    - [x] right click add node2d if no node2d
+    - [ ] menus
+    - [ ] variable
+    - [ ] functions
 
 ## Goals
 
 - Provide a working example of SDL3 and SDL_ttf integration.
-- Serve as a starting point for more complex projects, such as a terminal emulator.
+- Serve as a starting point for more complex projects, such as a node 2d editor.
 - Ensure a straightforward setup process for Windows developers using MSYS2.
 
 ## Requirements
@@ -92,5 +101,4 @@ This config and build application.
 - SDL: [Simple DirectMedia Layer](https://www.libsdl.org/).
 - SDL_ttf: [SDL_ttf Library](https://github.com/libsdl-org/SDL_ttf).
 - FreeType: [FreeType Project](https://www.freetype.org/).
-
 
