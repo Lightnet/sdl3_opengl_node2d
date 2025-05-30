@@ -18,21 +18,21 @@ sdl3_opengl_node2d/
 # Features
 
 - Node2D Editor:
-    - Dragging: Drag nodes by left-clicking and moving the mouse.
-    - Input/Output Ports: Green squares for input ports, red squares for output ports, with text labels (e.g., “In1”, “Out1”).
-    - Connections:
-        - Left-click a red output square, then a green input square to connect with a white line.
-        - Right-click a green input square to disconnect a specific connection.            
-    - Node Addition: Right-click away from green squares to add a new node at the click position.
-    - Panning: Middle-click and drag to pan the view.
-    - Zooming: Scroll wheel to zoom in/out (0.5x to 2.0x), centered on the mouse cursor.
-    - Menus: Planned for node type selection and configuration.
-    - Variables: Planned for node data storage.
-    - Functions: Planned for node-based logic or scripting.
+    - [x] Dragging: Drag nodes by left-clicking and moving the mouse.
+    - [x] Input/Output Ports: Green squares for input ports, red squares for output ports, with text labels (e.g., “In1”, “Out1”).
+    - [x] Connections:
+        - [x] Left-click a red output square, then a green input square to connect with a white line.
+        - [x] Left-click a green input square to disconnect a specific connection.            
+    - [ ] Node Addition: Right-click away from green squares to add a new node at the click position.
+    - [ ] Panning: Middle-click and drag to pan the view.
+    - [ ] Zooming: Scroll wheel to zoom in/out (0.5x to 2.0x), centered on the mouse cursor.
+    - [ ] Menus: Planned for node type selection and configuration.
+    - [ ] Variables: Planned for node data storage.
+    - [ ] Functions: Planned for node-based logic or scripting.
 - Rendering:
-    - Nodes rendered as blue 100x100 squares, scaling with zoom.
-    - Red debug rectangle outlines nodes during dragging.
-    - Yellow lines indicate active connections during creation.
+    - [ ] Nodes rendered as blue 100x100 squares, scaling with zoom.
+    - [ ] Red debug rectangle outlines nodes during dragging.
+    - [ ] Yellow lines indicate active connections during creation.
 - Static Linking: SDL3, SDL_ttf, and FreeType are statically linked to avoid DLL dependencies.
 - Cross-Platform Build: Configured with CMake for MinGW-w64, adaptable to other platforms.
     

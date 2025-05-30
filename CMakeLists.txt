@@ -59,8 +59,6 @@ target_include_directories(glad PUBLIC
     ${CMAKE_SOURCE_DIR}/glad/include
 )
 
-
-
 set(APP_NAME sdl3_node2d_editor)
 
 add_executable(${APP_NAME} src/main.c)

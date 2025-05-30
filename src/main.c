@@ -60,7 +60,6 @@ static FT_Library ft;
 static FT_Face face;
 static Character characters[128]; // Store ASCII characters
 
-
 // Vertex shader for lines
 const char *line_vertex_shader_src =
     "#version 330 core\n"
@@ -232,8 +231,6 @@ void init_text_opengl(void) {
     glBindVertexArray(0);
 }
 
-
-
 void init_opengl(void) {
     if (!gladLoaderLoadGL()) {
         printf("Failed to initialize GLAD\n");
@@ -345,9 +342,6 @@ void init_opengl(void) {
     init_text_opengl();
 }
 
-
-
-
 void update_node_vertices(int index) {
     Node2D *node = &nodes[index];
     // Update main square vertices
@@ -381,10 +375,6 @@ void update_node_vertices(int index) {
     glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(output_vertices), output_vertices);
 }
 
-
-
-
-
 void update_square_vertices(void) {
     float vertices[] = {
         square_pos_x - 0.25f, square_pos_y + 0.25f, 0.0f, // Top-left
@@ -395,7 +385,6 @@ void update_square_vertices(void) {
     glBindBuffer(GL_ARRAY_BUFFER, vbo);
     glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(vertices), vertices);
 }
-
 
 // Function to render text
 void render_text(const char *text, float x, float y, float scale, float color[3]) {
@@ -452,8 +441,6 @@ void render_text(const char *text, float x, float y, float scale, float color[3]
     glDisable(GL_BLEND);
 }
 
-
-
 int main(int argc, char *argv[]) {
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         printf("SDL init failed: %s\n", SDL_GetError());
@@ -480,7 +467,6 @@ int main(int argc, char *argv[]) {
     }
 
     init_opengl();
-
 
     bool running = true;
     while (running) {
@@ -753,3 +739,5 @@ int main(int argc, char *argv[]) {
     SDL_Quit();
     return 0;
 }
+
+//
