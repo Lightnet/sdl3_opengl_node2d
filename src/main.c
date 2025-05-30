@@ -697,8 +697,8 @@ int main(int argc, char* argv[]) {
             glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
 
             float scaledTextX = (nodes[i].x + 5) * camera.scale - camera.x;
-            float scaledTextY = (nodes[i].y + 4) * camera.scale - camera.y;
-            float scaledTextWidth = textWidths[i] * camera.scale;
+            float scaledTextY = (nodes[i].y - 2) * camera.scale - camera.y;
+            float scaledTextWidth = textWidths[i] * camera.scale; // "node 1" position for in the gray rect area
             float scaledTextHeight = textHeights[i] * camera.scale;
             float textVertices[] = {
                 scaledTextX / WINDOW_WIDTH * 2 - 1, 1 - scaledTextY / WINDOW_HEIGHT * 2, 0.0f, 0.0f,
