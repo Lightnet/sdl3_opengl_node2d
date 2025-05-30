@@ -2,6 +2,9 @@
 
 # License: MIT
 
+# Status:
+- work in progress.
+
 # Project Overview
 
 sdl3_opengl_node2d is a sample project demonstrating a 2D node-based editor using SDL3, SDL_ttf, and FreeType. It renders a graphical interface with the "Kenney Mini" font and supports interactive node manipulation. Built for Windows using the MSYS2/MinGW-w64 environment, it serves as a foundation for developing node-based graphical applications, such as visual scripting or dataflow editors. The project uses SDL3’s software rendering for simplicity and portability.
@@ -22,8 +25,9 @@ sdl3_opengl_node2d/
     - [x] Input/Output Ports: Green squares for input ports, red squares for output ports, with text labels (e.g., “In1”, “Out1”).
     - [x] Connections:
         - [x] Left-click a red output square, then a green input square to connect with a white line.
-        - [x] Left-click a green input square to disconnect a specific connection.            
-    - [ ] Node Addition: Right-click away from green squares to add a new node at the click position.
+        - [x] Middle-click a disconnect a specific connection.            
+    - [x] Node Addition: Right-click away from green squares to add a new node at the click position.
+    - [x] delete. drag and delete key.
     - [ ] Panning: Middle-click and drag to pan the view.
     - [ ] Zooming: Scroll wheel to zoom in/out (0.5x to 2.0x), centered on the mouse cursor.
     - [ ] Menus: Planned for node type selection and configuration.
@@ -185,3 +189,10 @@ Setup Instructions
 - Node Types: Support different node categories (e.g., math, logic, input/output).
 - Save/Load: Allow saving and loading node graphs to/from files.
 - OpenGL Integration: Optionally switch to OpenGL for enhanced rendering (if needed).
+
+# Credits:
+- blender Node 2D editor idea.
+- https://kenney.nl/assets/kenney-fonts
+- Grok
+    - work code
+    - manual feed data and mistakes.

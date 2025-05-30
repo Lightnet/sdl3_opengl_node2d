@@ -1,743 +1,768 @@
 #include <SDL3/SDL.h>
-#include <SDL3/SDL_main.h>
+#include <SDL3_ttf/SDL_ttf.h>
 #include <glad/gl.h>
-#include <ft2build.h>
-#include FT_FREETYPE_H // FreeType header
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
+#include <math.h>
+#include <stdbool.h>
+
+#define WINDOW_WIDTH 800
+#define WINDOW_HEIGHT 600
+#define MAX_NODES 1005
+#define MAX_CONNECTIONS 40
+#define HEADER_HEIGHT 24.0f
+#define SLOT_RADIUS 8.0f
+#define DISCONNECT_DISTANCE 5.0f
+#define OUTLINE_RADIUS 10.0f
+#define BORDER_OFFSET 2.0f
+#define ZOOM_MIN 0.5f
+#define ZOOM_MAX 2.0f
+#define ZOOM_STEP 0.1f
 
 typedef struct {
-    float x, y; // Center position in NDC
-    float width, height; // Size of the main square
-    float input_x, input_y; // Center of input rectangle
-    float output_x, output_y; // Center of output rectangle
-    float io_width, io_height; // Size of input/output rectangles
-    GLuint vao, vbo; // For the main square
-    GLuint input_vao, input_vbo; // For input rectangle
-    GLuint output_vao, output_vbo; // For output rectangle
-    int connected_to; // Index of Node2D this node's input is connected to (-1 if none)
-    bool is_input_connected; // True if input is connected
-    bool is_output_connected; // True if output is connected
-    char name[16]; // Name of the node (e.g., "Node 0")
+    float x, y;
+    float scale;
+} Camera;
+
+typedef struct {
+    float x, y;
+    float width, height;
+    char name[32];
+    float inputX, inputY;
+    float outputX, outputY;
 } Node2D;
 
-#define MAX_NODES 10
-static Node2D nodes[MAX_NODES]; // Array of Node2D instances
-static Node2D node; // Single Node2D 
-
-static int node_count = 2; // Start with 2 nodes for demonstration
-
-static float square_pos_x = 0.0f; // Square's center X in NDC
-static float square_pos_y = 0.0f; // Square's center Y in NDC
-static bool is_dragging = false; // Track if mouse is dragging
-
-static int dragging_node = -1; // Index of node being dragged
-
-static float drag_offset_x = 0.0f; // Offset from square center to mouse click
-static float drag_offset_y = 0.0f; // Offset from square center to mouse click
-
-static bool is_connecting = false; // Track if connecting
-static int connecting_node = -1; // Index of node whose input is being connected
-static bool is_connecting_from_output = false; // Track if connecting from output (red)
-static float connecting_x, connecting_y; // Current mouse position for drawing line
-static GLuint line_vao, line_vbo; // For rendering connection lines
-
-
-// Structure to store character glyph data
 typedef struct {
-    GLuint texture_id; // Texture ID for the glyph
-    int width, height; // Glyph dimensions
-    int bearing_x, bearing_y; // Offset from baseline to left/top
-    unsigned int advance; // Advance to next glyph
-} Character;
+    int fromNode;
+    int toNode;
+} Connection;
 
-static SDL_Window *window = NULL;
-static SDL_GLContext gl_context = NULL;
-static GLuint shader_program, vao, vbo;
-static GLuint text_shader_program, text_vao, text_vbo; // For text rendering
-static FT_Library ft;
-static FT_Face face;
-static Character characters[128]; // Store ASCII characters
-
-// Vertex shader for lines
-const char *line_vertex_shader_src =
-    "#version 330 core\n"
-    "layout(location = 0) in vec3 aPos;\n"
-    "void main() {\n"
-    "    gl_Position = vec4(aPos, 1.0);\n"
-    "}\n";
-
-// Fragment shader for lines
-const char *line_fragment_shader_src =
-    "#version 330 core\n"
-    "out vec4 FragColor;\n"
-    "void main() {\n"
-    "    FragColor = vec4(1.0, 1.0, 1.0, 1.0); // White line\n"
-    "}\n";
-
-static GLuint line_shader_program;
-
-// Vertex shader for the square
-const char *vertex_shader_src =
-    "#version 330 core\n"
-    "layout(location = 0) in vec3 aPos;\n"
-    "void main() {\n"
-    "    gl_Position = vec4(aPos, 1.0);\n"
-    "}\n";
-
-// Fragment shader for the square
-const char *fragment_shader_src =
-    "#version 330 core\n"
-    "out vec4 FragColor;\n"
-    "uniform vec3 color;\n"
-    "void main() {\n"
-    "    FragColor = vec4(color, 1.0);\n"
-    "}\n";
-
-// Vertex shader for text (includes texture coordinates)
-const char *text_vertex_shader_src =
-    "#version 330 core\n"
-    "layout(location = 0) in vec4 aPosTex; // <vec2 pos, vec2 tex>\n"
+const char* vertexShaderSource = "#version 330 core\n"
+    "layout (location = 0) in vec2 aPos;\n"
+    "layout (location = 1) in vec2 aTexCoord;\n"
     "out vec2 TexCoord;\n"
-    "uniform mat4 projection;\n"
     "void main() {\n"
-    "    gl_Position = projection * vec4(aPosTex.xy, 0.0, 1.0);\n"
-    "    TexCoord = aPosTex.zw;\n"
+    "   gl_Position = vec4(aPos, 0.0, 1.0);\n"
+    "   TexCoord = aTexCoord;\n"
     "}\n";
 
-// Fragment shader for text
-const char *text_fragment_shader_src =
-    "#version 330 core\n"
-    "in vec2 TexCoord;\n"
+const char* fragmentShaderSource = "#version 330 core\n"
     "out vec4 FragColor;\n"
-    "uniform sampler2D textTexture;\n"
-    "uniform vec3 textColor;\n"
+    "in vec2 TexCoord;\n"
+    "uniform sampler2D texture1;\n"
+    "uniform int useTexture;\n"
+    "uniform vec3 color;\n"
+    "uniform int isCircle;\n"
     "void main() {\n"
-    "    vec4 sampled = vec4(1.0, 1.0, 1.0, texture(textTexture, TexCoord).r);\n"
-    "    FragColor = vec4(textColor, 1.0) * sampled;\n"
+    "   if (isCircle == 1) {\n"
+    "       float dist = length(TexCoord - vec2(0.5, 0.5));\n"
+    "       if (dist > 0.5) discard;\n"
+    "       FragColor = vec4(color, 1.0);\n"
+    "   } else if (useTexture == 1) {\n"
+    "       FragColor = texture(texture1, TexCoord);\n"
+    "   } else {\n"
+    "       FragColor = vec4(color, 1.0);\n"
+    "   }\n"
     "}\n";
 
-GLuint compile_shader(GLenum type, const char *source) {
-    GLuint shader = glCreateShader(type);
-    glShaderSource(shader, 1, &source, NULL);
-    glCompileShader(shader);
+int main(int argc, char* argv[]) {
+    if (SDL_Init(SDL_INIT_VIDEO) < 0) {
+        printf("SDL_Init failed: %s\n", SDL_GetError());
+        getchar();
+        return 1;
+    }
+    if (TTF_Init() < 0) {
+        printf("TTF_Init failed: %s\n", SDL_GetError());
+        SDL_Quit();
+        getchar();
+        return 1;
+    }
+
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+
+    SDL_Window* window = SDL_CreateWindow("Node2D Editor", WINDOW_WIDTH, WINDOW_HEIGHT, SDL_WINDOW_OPENGL);
+    if (!window) {
+        printf("Window creation failed: %s\n", SDL_GetError());
+        TTF_Quit();
+        SDL_Quit();
+        getchar();
+        return 1;
+    }
+
+    SDL_GLContext glContext = SDL_GL_CreateContext(window);
+    if (!glContext) {
+        printf("OpenGL context creation failed: %s\n", SDL_GetError());
+        SDL_DestroyWindow(window);
+        TTF_Quit();
+        SDL_Quit();
+        getchar();
+        return 1;
+    }
+
+    if (SDL_GL_MakeCurrent(window, glContext) < 0) {
+        printf("SDL_GL_MakeCurrent failed: %s\n", SDL_GetError());
+        SDL_GL_DestroyContext(glContext);
+        SDL_DestroyWindow(window);
+        TTF_Quit();
+        SDL_Quit();
+        getchar();
+        return 1;
+    }
+
+    if (!gladLoadGL((GLADloadfunc)SDL_GL_GetProcAddress)) {
+        printf("Failed to load GLAD: %s\n", SDL_GetError());
+        SDL_GL_DestroyContext(glContext);
+        SDL_DestroyWindow(window);
+        TTF_Quit();
+        SDL_Quit();
+        getchar();
+        return 1;
+    }
+
+    printf("GL_VERSION : %s\n", glGetString(GL_VERSION));
+    printf("GL_VENDOR  : %s\n", glGetString(GL_VENDOR));
+    printf("GL_RENDERER: %s\n", glGetString(GL_RENDERER));
+
+    glViewport(0, 0, WINDOW_WIDTH, WINDOW_HEIGHT);
+
+    GLuint vertexShader = glCreateShader(GL_VERTEX_SHADER);
+    glShaderSource(vertexShader, 1, &vertexShaderSource, NULL);
+    glCompileShader(vertexShader);
     GLint success;
-    glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
+    glGetShaderiv(vertexShader, GL_COMPILE_STATUS, &success);
     if (!success) {
-        char info_log[512];
-        glGetShaderInfoLog(shader, 512, NULL, info_log);
-        printf("Shader compilation failed: %s\n", info_log);
-        glDeleteShader(shader);
-        return 0;
-    }
-    return shader;
-}
-
-void init_freetype(void) {
-    // Initialize FreeType
-    if (FT_Init_FreeType(&ft)) {
-        printf("Failed to initialize FreeType\n");
-        exit(1);
+        char infoLog[512];
+        glGetShaderInfoLog(vertexShader, 512, NULL, infoLog);
+        printf("Vertex shader compilation failed: %s\n", infoLog);
+        getchar();
     }
 
-    // Load font (ensure arial.ttf is in your project directory)
-    if (FT_New_Face(ft, "Kenney Mini.ttf", 0, &face)) {
-        printf("Failed to load font\n");
-        exit(1);
+    GLuint fragmentShader = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(fragmentShader, 1, &fragmentShaderSource, NULL);
+    glCompileShader(fragmentShader);
+    glGetShaderiv(fragmentShader, GL_COMPILE_STATUS, &success);
+    if (!success) {
+        char infoLog[512];
+        glGetShaderInfoLog(fragmentShader, 512, NULL, infoLog);
+        printf("Fragment shader compilation failed: %s\n", infoLog);
+        getchar();
     }
 
-    // Set pixel size for the font
-    FT_Set_Pixel_Sizes(face, 0, 48);
+    GLuint shaderProgram = glCreateProgram();
+    glAttachShader(shaderProgram, vertexShader);
+    glAttachShader(shaderProgram, fragmentShader);
+    glLinkProgram(shaderProgram);
+    glGetProgramiv(shaderProgram, GL_LINK_STATUS, &success);
+    if (!success) {
+        char infoLog[512];
+        glGetProgramInfoLog(shaderProgram, 512, NULL, infoLog);
+        printf("Shader program linking failed: %s\n", infoLog);
+        getchar();
+    }
+    glDeleteShader(vertexShader);
+    glDeleteShader(fragmentShader);
 
-    // Disable byte-alignment restriction
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    Camera camera = {0.0f, 0.0f, 1.0f};
 
-    // Load first 128 ASCII characters
-    for (unsigned char c = 0; c < 128; c++) {
-        if (FT_Load_Char(face, c, FT_LOAD_RENDER)) {
-            printf("Failed to load glyph '%c'\n", c);
-            continue;
+    Node2D nodes[MAX_NODES];
+    int nodeCount = 3;
+    for (int i = 0; i < nodeCount; i++) {
+        nodes[i].x = 100.0f + 150.0f * i;
+        nodes[i].y = 100.0f;
+        nodes[i].width = 100.0f;
+        nodes[i].height = 100.0f;
+        snprintf(nodes[i].name, sizeof(nodes[i].name), "Node %d", i);
+        nodes[i].inputX = nodes[i].x;
+        nodes[i].inputY = nodes[i].y + HEADER_HEIGHT + (nodes[i].height - HEADER_HEIGHT) / 2;
+        nodes[i].outputX = nodes[i].x + nodes[i].width;
+        nodes[i].outputY = nodes[i].inputY;
+    }
+
+    Connection connections[MAX_CONNECTIONS];
+    int connectionCount = 0;
+
+    TTF_Font* font = TTF_OpenFont("Kenney Mini.ttf", 24);
+    if (!font) {
+        printf("Failed to load font: %s\n", SDL_GetError());
+        glDeleteProgram(shaderProgram);
+        SDL_GL_DestroyContext(glContext);
+        SDL_DestroyWindow(window);
+        TTF_Quit();
+        SDL_Quit();
+        getchar();
+        return 1;
+    }
+
+    GLuint textTextures[MAX_NODES];
+    float textWidths[MAX_NODES], textHeights[MAX_NODES];
+    glGenTextures(nodeCount, textTextures);
+    for (int i = 0; i < nodeCount; i++) {
+        SDL_Color textColor = {255, 255, 255, 255};
+        SDL_Surface* textSurface = TTF_RenderText_Blended(font, nodes[i].name, strlen(nodes[i].name), textColor);
+        if (!textSurface) {
+            printf("Failed to render text for %s: %s\n", nodes[i].name, SDL_GetError());
+            for (int j = 0; j < i; j++) glDeleteTextures(1, &textTextures[j]);
+            TTF_CloseFont(font);
+            glDeleteProgram(shaderProgram);
+            SDL_GL_DestroyContext(glContext);
+            SDL_DestroyWindow(window);
+            TTF_Quit();
+            SDL_Quit();
+            getchar();
+            return 1;
         }
 
-        // Generate texture
-        GLuint texture;
-        glGenTextures(1, &texture);
-        glBindTexture(GL_TEXTURE_2D, texture);
-        glTexImage2D(
-            GL_TEXTURE_2D,
-            0,
-            GL_RED,
-            face->glyph->bitmap.width,
-            face->glyph->bitmap.rows,
-            0,
-            GL_RED,
-            GL_UNSIGNED_BYTE,
-            face->glyph->bitmap.buffer
-        );
+        SDL_Surface* convertedSurface = SDL_ConvertSurface(textSurface, SDL_PIXELFORMAT_RGBA32);
+        if (!convertedSurface) {
+            printf("Failed to convert surface for %s: %s\n", nodes[i].name, SDL_GetError());
+            SDL_DestroySurface(textSurface);
+            for (int j = 0; j < i; j++) glDeleteTextures(1, &textTextures[j]);
+            TTF_CloseFont(font);
+            glDeleteProgram(shaderProgram);
+            SDL_GL_DestroyContext(glContext);
+            SDL_DestroyWindow(window);
+            TTF_Quit();
+            SDL_Quit();
+            getchar();
+            return 1;
+        }
 
-        // Texture parameters
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        textWidths[i] = (float)convertedSurface->w;
+        textHeights[i] = (float)convertedSurface->h;
+
+        glBindTexture(GL_TEXTURE_2D, textTextures[i]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, convertedSurface->w, convertedSurface->h, 0, GL_RGBA, GL_UNSIGNED_BYTE, convertedSurface->pixels);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-        // Store character data
-        characters[c] = (Character){
-            .texture_id = texture,
-            .width = face->glyph->bitmap.width,
-            .height = face->glyph->bitmap.rows,
-            .bearing_x = face->glyph->bitmap_left,
-            .bearing_y = face->glyph->bitmap_top,
-            .advance = face->glyph->advance.x
-        };
+        SDL_DestroySurface(convertedSurface);
+        SDL_DestroySurface(textSurface);
     }
 
-    glBindTexture(GL_TEXTURE_2D, 0);
-}
+    GLuint cameraTextTexture = 0;
+    float cameraTextWidth = 0, cameraTextHeight = 0;
+    bool updateCameraText = true;
 
-void init_text_opengl(void) {
-    // Compile text shaders
-    GLuint vertex_shader = compile_shader(GL_VERTEX_SHADER, text_vertex_shader_src);
-    GLuint fragment_shader = compile_shader(GL_FRAGMENT_SHADER, text_fragment_shader_src);
-    if (!vertex_shader || !fragment_shader) {
-        exit(1);
-    }
+    GLuint VAO, VBO, EBO;
+    glGenVertexArrays(1, &VAO);
+    glGenBuffers(1, &VBO);
+    glGenBuffers(1, &EBO);
 
-    // Link text shader program
-    text_shader_program = glCreateProgram();
-    glAttachShader(text_shader_program, vertex_shader);
-    glAttachShader(text_shader_program, fragment_shader);
-    glLinkProgram(text_shader_program);
-    GLint success;
-    glGetProgramiv(text_shader_program, GL_LINK_STATUS, &success);
-    if (!success) {
-        char info_log[512];
-        glGetProgramInfoLog(text_shader_program, 512, NULL, info_log);
-        printf("Text shader program linking failed: %s\n", info_log);
-        exit(1);
-    }
-    glDeleteShader(vertex_shader);
-    glDeleteShader(fragment_shader);
+    glBindVertexArray(VAO);
+    glBindBuffer(GL_ARRAY_BUFFER, VBO);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO);
 
-    // Set up text VAO and VBO
-    glGenVertexArrays(1, &text_vao);
-    glGenBuffers(1, &text_vbo);
-    glBindVertexArray(text_vao);
-    glBindBuffer(GL_ARRAY_BUFFER, text_vbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(float) * 6 * 4, NULL, GL_DYNAMIC_DRAW);
-    glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
     glEnableVertexAttribArray(0);
-    glBindVertexArray(0);
-}
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)(2 * sizeof(float)));
+    glEnableVertexAttribArray(1);
 
-void init_opengl(void) {
-    if (!gladLoaderLoadGL()) {
-        printf("Failed to initialize GLAD\n");
-        exit(1);
-    }
-
-    int win_w, win_h;
-    SDL_GetWindowSize(window, &win_w, &win_h);
-    glViewport(0, 0, win_w, win_h);
-
-    // Compile shaders for nodes
-    GLuint vertex_shader = compile_shader(GL_VERTEX_SHADER, vertex_shader_src);
-    GLuint fragment_shader = compile_shader(GL_FRAGMENT_SHADER, fragment_shader_src);
-    if (!vertex_shader || !fragment_shader) {
-        exit(1);
-    }
-    shader_program = glCreateProgram();
-    glAttachShader(shader_program, vertex_shader);
-    glAttachShader(shader_program, fragment_shader);
-    glLinkProgram(shader_program);
-    GLint success;
-    glGetProgramiv(shader_program, GL_LINK_STATUS, &success);
-    if (!success) {
-        char info_log[512];
-        glGetProgramInfoLog(shader_program, 512, NULL, info_log);
-        printf("Shader program linking failed: %s\n", info_log);
-        exit(1);
-    }
-    glDeleteShader(vertex_shader);
-    glDeleteShader(fragment_shader);
-
-    // Compile shaders for lines
-    vertex_shader = compile_shader(GL_VERTEX_SHADER, line_vertex_shader_src);
-    fragment_shader = compile_shader(GL_FRAGMENT_SHADER, line_fragment_shader_src);
-    if (!vertex_shader || !fragment_shader) {
-        exit(1);
-    }
-    line_shader_program = glCreateProgram();
-    glAttachShader(line_shader_program, vertex_shader);
-    glAttachShader(line_shader_program, fragment_shader);
-    glLinkProgram(line_shader_program);
-    glGetProgramiv(line_shader_program, GL_LINK_STATUS, &success);
-    if (!success) {
-        char info_log[512];
-        glGetProgramInfoLog(line_shader_program, 512, NULL, info_log);
-        printf("Line shader program linking failed: %s\n", info_log);
-        exit(1);
-    }
-    glDeleteShader(vertex_shader);
-    glDeleteShader(fragment_shader);
-
-    // Initialize two nodes
-    for (int i = 0; i < node_count; i++) {
-        nodes[i].x = -0.5f + i * 1.0f; // Space nodes apart
-        nodes[i].y = 0.0f;
-        nodes[i].width = 0.5f;
-        nodes[i].height = 0.5f;
-        nodes[i].io_width = 0.1f;
-        nodes[i].io_height = 0.1f;
-        nodes[i].input_x = nodes[i].x - nodes[i].width / 2.0f - nodes[i].io_width / 2.0f;
-        nodes[i].input_y = nodes[i].y;
-        nodes[i].output_x = nodes[i].x + nodes[i].width / 2.0f + nodes[i].io_width / 2.0f;
-        nodes[i].output_y = nodes[i].y;
-        nodes[i].connected_to = -1; // No initial connection
-        nodes[i].is_input_connected = false; // Input not connected
-        nodes[i].is_output_connected = false; // Output not connected
-        snprintf(nodes[i].name, sizeof(nodes[i].name), "Node %d", i); // Set node name
-
-        // Setup main square VAO/VBO
-        glGenVertexArrays(1, &nodes[i].vao);
-        glGenBuffers(1, &nodes[i].vbo);
-        glBindVertexArray(nodes[i].vao);
-        glBindBuffer(GL_ARRAY_BUFFER, nodes[i].vbo);
-        glBufferData(GL_ARRAY_BUFFER, sizeof(float) * 4 * 3, NULL, GL_DYNAMIC_DRAW);
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
-        glEnableVertexAttribArray(0);
-
-        // Setup input rectangle VAO/VBO
-        glGenVertexArrays(1, &nodes[i].input_vao);
-        glGenBuffers(1, &nodes[i].input_vbo);
-        glBindVertexArray(nodes[i].input_vao);
-        glBindBuffer(GL_ARRAY_BUFFER, nodes[i].input_vbo);
-        glBufferData(GL_ARRAY_BUFFER, sizeof(float) * 4 * 3, NULL, GL_DYNAMIC_DRAW);
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
-        glEnableVertexAttribArray(0);
-
-        // Setup output rectangle VAO/VBO
-        glGenVertexArrays(1, &nodes[i].output_vao);
-        glGenBuffers(1, &nodes[i].output_vbo);
-        glBindVertexArray(nodes[i].output_vao);
-        glBindBuffer(GL_ARRAY_BUFFER, nodes[i].output_vbo);
-        glBufferData(GL_ARRAY_BUFFER, sizeof(float) * 4 * 3, NULL, GL_DYNAMIC_DRAW);
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
-        glEnableVertexAttribArray(0);
-    }
-
-    // Setup line VAO/VBO
-    glGenVertexArrays(1, &line_vao);
-    glGenBuffers(1, &line_vbo);
-    glBindVertexArray(line_vao);
-    glBindBuffer(GL_ARRAY_BUFFER, line_vbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(float) * 2 * 3, NULL, GL_DYNAMIC_DRAW);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
-    glEnableVertexAttribArray(0);
-    glBindVertexArray(0);
-
-    // Initialize FreeType and text rendering
-    init_freetype();
-    init_text_opengl();
-}
-
-void update_node_vertices(int index) {
-    Node2D *node = &nodes[index];
-    // Update main square vertices
-    float square_vertices[] = {
-        node->x - node->width / 2.0f, node->y + node->height / 2.0f, 0.0f,
-        node->x + node->width / 2.0f, node->y + node->height / 2.0f, 0.0f,
-        node->x + node->width / 2.0f, node->y - node->height / 2.0f, 0.0f,
-        node->x - node->width / 2.0f, node->y - node->height / 2.0f, 0.0f
-    };
-    glBindBuffer(GL_ARRAY_BUFFER, node->vbo);
-    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(square_vertices), square_vertices);
-
-    // Update input rectangle vertices
-    float input_vertices[] = {
-        node->input_x - node->io_width / 2.0f, node->input_y + node->io_height / 2.0f, 0.0f,
-        node->input_x + node->io_width / 2.0f, node->input_y + node->io_height / 2.0f, 0.0f,
-        node->input_x + node->io_width / 2.0f, node->input_y - node->io_height / 2.0f, 0.0f,
-        node->input_x - node->io_width / 2.0f, node->input_y - node->io_height / 2.0f, 0.0f
-    };
-    glBindBuffer(GL_ARRAY_BUFFER, node->input_vbo);
-    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(input_vertices), input_vertices);
-
-    // Update output rectangle vertices
-    float output_vertices[] = {
-        node->output_x - node->io_width / 2.0f, node->output_y + node->io_height / 2.0f, 0.0f,
-        node->output_x + node->io_width / 2.0f, node->output_y + node->io_height / 2.0f, 0.0f,
-        node->output_x + node->io_width / 2.0f, node->output_y - node->io_height / 2.0f, 0.0f,
-        node->output_x - node->io_width / 2.0f, node->output_y - node->io_height / 2.0f, 0.0f
-    };
-    glBindBuffer(GL_ARRAY_BUFFER, node->output_vbo);
-    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(output_vertices), output_vertices);
-}
-
-void update_square_vertices(void) {
-    float vertices[] = {
-        square_pos_x - 0.25f, square_pos_y + 0.25f, 0.0f, // Top-left
-        square_pos_x + 0.25f, square_pos_y + 0.25f, 0.0f, // Top-right
-        square_pos_x + 0.25f, square_pos_y - 0.25f, 0.0f, // Bottom-right
-        square_pos_x - 0.25f, square_pos_y - 0.25f, 0.0f  // Bottom-left
-    };
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(vertices), vertices);
-}
-
-// Function to render text
-void render_text(const char *text, float x, float y, float scale, float color[3]) {
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-    // Set up orthographic projection
-    int win_w, win_h;
-    SDL_GetWindowSize(window, &win_w, &win_h);
-    float projection[16] = {
-        2.0f / win_w, 0.0f, 0.0f, 0.0f,
-        0.0f, -2.0f / win_h, 0.0f, 0.0f,
-        0.0f, 0.0f, -1.0f, 0.0f,
-        -1.0f, 1.0f, 0.0f, 1.0f
-    };
+    GLint useTextureLoc = glGetUniformLocation(shaderProgram, "useTexture");
+    GLint colorLoc = glGetUniformLocation(shaderProgram, "color");
+    GLint isCircleLoc = glGetUniformLocation(shaderProgram, "isCircle");
 
-    glUseProgram(text_shader_program);
-    glUniform3f(glGetUniformLocation(text_shader_program, "textColor"), color[0], color[1], color[2]);
-    glUniformMatrix4fv(glGetUniformLocation(text_shader_program, "projection"), 1, GL_FALSE, projection);
-    glActiveTexture(GL_TEXTURE0);
-    glBindVertexArray(text_vao);
-
-    // Iterate through all characters
-    for (const char *c = text; *c; c++) {
-        Character ch = characters[(unsigned char)*c];
-
-        float xpos = x + ch.bearing_x * scale;
-        float ypos = y - ch.bearing_y * scale; // Align to top
-        float w = ch.width * scale;
-        float h = ch.height * scale;
-
-        // Update VBO for each character (flipped texture coordinates)
-        float vertices[6][4] = {
-            { xpos,     ypos + h, 0.0f, 1.0f }, // Top-left
-            { xpos,     ypos,     0.0f, 0.0f }, // Bottom-left
-            { xpos + w, ypos,     1.0f, 0.0f }, // Bottom-right
-            { xpos,     ypos + h, 0.0f, 1.0f }, // Top-left
-            { xpos + w, ypos,     1.0f, 0.0f }, // Bottom-right
-            { xpos + w, ypos + h, 1.0f, 1.0f }  // Top-right
-        };
-
-        // Render glyph texture
-        glBindTexture(GL_TEXTURE_2D, ch.texture_id);
-        glBindBuffer(GL_ARRAY_BUFFER, text_vbo);
-        glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(vertices), vertices);
-        glDrawArrays(GL_TRIANGLES, 0, 6);
-
-        // Advance cursor
-        x += (ch.advance >> 6) * scale; // Bitshift by 6 to get value in pixels
-    }
-
-    glBindVertexArray(0);
-    glBindTexture(GL_TEXTURE_2D, 0);
-    glDisable(GL_BLEND);
-}
-
-int main(int argc, char *argv[]) {
-    if (!SDL_Init(SDL_INIT_VIDEO)) {
-        printf("SDL init failed: %s\n", SDL_GetError());
-        return 1;
-    }
-
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
-
-    window = SDL_CreateWindow("SDL3 GLAD Square", 800, 600, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
-    if (!window) {
-        printf("Window creation failed: %s\n", SDL_GetError());
-        SDL_Quit();
-        return 1;
-    }
-
-    gl_context = SDL_GL_CreateContext(window);
-    if (!gl_context) {
-        printf("GL context creation failed: %s\n", SDL_GetError());
-        SDL_DestroyWindow(window);
-        SDL_Quit();
-        return 1;
-    }
-
-    init_opengl();
+    int draggedNode = -1;
+    float dragOffsetX, dragOffsetY;
+    int connectingNode = -1;
+    float connectStartX, connectStartY;
+    bool panning = false;
+    float panStartX, panStartY;
 
     bool running = true;
+    SDL_Event event;
     while (running) {
-        SDL_Event event;
         while (SDL_PollEvent(&event)) {
             if (event.type == SDL_EVENT_QUIT) {
                 running = false;
             }
-            if (event.type == SDL_EVENT_WINDOW_RESIZED) {
-                glViewport(0, 0, event.window.data1, event.window.data2);
+            else if (event.type == SDL_EVENT_KEY_DOWN) {
+                if (event.key.key == SDLK_DELETE) {
+                    if (draggedNode != -1 && nodeCount > 0) {
+                        printf("Deleted %s\n", nodes[draggedNode].name);
+                        glDeleteTextures(1, &textTextures[draggedNode]);
+                        for (int i = draggedNode; i < nodeCount - 1; i++) {
+                            nodes[i] = nodes[i + 1];
+                            textTextures[i] = textTextures[i + 1];
+                            textWidths[i] = textWidths[i + 1];
+                            textHeights[i] = textHeights[i + 1];
+                        }
+                        int i = 0;
+                        while (i < connectionCount) {
+                            if (connections[i].fromNode == draggedNode || connections[i].toNode == draggedNode) {
+                                for (int j = i; j < connectionCount - 1; j++) {
+                                    connections[j] = connections[j + 1];
+                                }
+                                connectionCount--;
+                            } else {
+                                if (connections[i].fromNode > draggedNode) connections[i].fromNode--;
+                                if (connections[i].toNode > draggedNode) connections[i].toNode--;
+                                i++;
+                            }
+                        }
+                        nodeCount--;
+                        draggedNode = -1;
+                        updateCameraText = true;
+                    }
+                }
             }
-            if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
-                if (event.button.button == SDL_BUTTON_LEFT) {
-                    int win_w, win_h;
-                    SDL_GetWindowSize(window, &win_w, &win_h);
-                    float mouse_x = (2.0f * event.button.x / win_w) - 1.0f;
-                    float mouse_y = 1.0f - (2.0f * event.button.y / win_h);
+            else if (event.type == SDL_EVENT_MOUSE_WHEEL) { // New: Mouse wheel zoom
+                float mouseX, mouseY;
+                SDL_GetMouseState(&mouseX, &mouseY);
+                float worldX = (mouseX + camera.x) / camera.scale;
+                float worldY = (mouseY + camera.y) / camera.scale;
+                float oldScale = camera.scale;
+                if (event.wheel.y > 0) {
+                    camera.scale = fminf(camera.scale + ZOOM_STEP, ZOOM_MAX);
+                } else if (event.wheel.y < 0) {
+                    camera.scale = fmaxf(camera.scale - ZOOM_STEP, ZOOM_MIN);
+                }
+                if (camera.scale != oldScale) {
+                    camera.x = worldX * camera.scale - mouseX;
+                    camera.y = worldY * camera.scale - mouseY;
+                    printf("Zoomed to scale %.2f\n", camera.scale);
+                    updateCameraText = true;
+                }
+            }
+            else if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
+                float mouseX = event.button.x;
+                float mouseY = event.button.y;
+                float worldX = (mouseX + camera.x) / camera.scale;
+                float worldY = (mouseY + camera.y) / camera.scale;
 
-                    // Check for dragging (main square only)
-                    for (int i = 0; i < node_count; i++) {
-                        if (mouse_x >= nodes[i].x - nodes[i].width / 2.0f &&
-                            mouse_x <= nodes[i].x + nodes[i].width / 2.0f &&
-                            mouse_y >= nodes[i].y - nodes[i].height / 2.0f &&
-                            mouse_y <= nodes[i].y + nodes[i].height / 2.0f) {
-                            is_dragging = true;
-                            dragging_node = i;
-                            drag_offset_x = nodes[i].x - mouse_x;
-                            drag_offset_y = nodes[i].y - mouse_y;
+                if (event.button.button == SDL_BUTTON_LEFT) {
+                    for (int i = 0; i < nodeCount; i++) {
+                        float dx = worldX - nodes[i].outputX;
+                        float dy = worldY - nodes[i].outputY;
+                        if (dx * dx + dy * dy <= SLOT_RADIUS * SLOT_RADIUS / (camera.scale * camera.scale)) {
+                            connectingNode = i;
+                            connectStartX = nodes[i].outputX;
+                            connectStartY = nodes[i].outputY;
+                            printf("Starting connection from %s\n", nodes[i].name);
                             break;
                         }
                     }
 
-                    // Check for connection start, disconnection, or completion
-                    if (!is_dragging) {
-                        for (int i = 0; i < node_count; i++) {
-                            // Check input rectangle
-                            if (mouse_x >= nodes[i].input_x - nodes[i].io_width / 2.0f &&
-                                mouse_x <= nodes[i].input_x + nodes[i].io_width / 2.0f &&
-                                mouse_y >= nodes[i].input_y - nodes[i].io_height / 2.0f &&
-                                mouse_y <= nodes[i].input_y + nodes[i].io_height / 2.0f) {
-                                if (nodes[i].is_input_connected) {
-                                    // Disconnect input
-                                    int target_node = nodes[i].connected_to;
-                                    if (target_node != -1) {
-                                        nodes[target_node].is_output_connected = false;
-                                    }
-                                    nodes[i].connected_to = -1;
-                                    nodes[i].is_input_connected = false;
-                                    is_connecting = false;
-                                    connecting_node = -1;
-                                    is_connecting_from_output = false;
-                                } else if (is_connecting && is_connecting_from_output && i != connecting_node &&
-                                        !nodes[i].is_input_connected) {
-                                    // Complete connection from output to input
-                                    nodes[i].connected_to = connecting_node;
-                                    nodes[i].is_input_connected = true;
-                                    nodes[connecting_node].is_output_connected = true;
-                                    is_connecting = false;
-                                    connecting_node = -1;
-                                    is_connecting_from_output = false;
-                                } else if (!is_connecting && !nodes[i].is_input_connected) {
-                                    // Start connecting from input
-                                    is_connecting = true;
-                                    connecting_node = i;
-                                    is_connecting_from_output = false;
-                                    connecting_x = nodes[i].input_x;
-                                    connecting_y = nodes[i].input_y;
-                                }
-                                break;
-                            }
-                            // Check output rectangle
-                            if (mouse_x >= nodes[i].output_x - nodes[i].io_width / 2.0f &&
-                                mouse_x <= nodes[i].output_x + nodes[i].io_width / 2.0f &&
-                                mouse_y >= nodes[i].output_y - nodes[i].io_height / 2.0f &&
-                                mouse_y <= nodes[i].output_y + nodes[i].io_height / 2.0f) {
-                                if (nodes[i].is_output_connected) {
-                                    // Disconnect output
-                                    for (int j = 0; j < node_count; j++) {
-                                        if (nodes[j].connected_to == i) {
-                                            nodes[j].connected_to = -1;
-                                            nodes[j].is_input_connected = false;
-                                            break;
-                                        }
-                                    }
-                                    nodes[i].is_output_connected = false;
-                                    is_connecting = false;
-                                    connecting_node = -1;
-                                    is_connecting_from_output = false;
-                                } else if (!is_connecting && !nodes[i].is_output_connected) {
-                                    // Start connecting from output
-                                    is_connecting = true;
-                                    connecting_node = i;
-                                    is_connecting_from_output = true;
-                                    connecting_x = nodes[i].output_x;
-                                    connecting_y = nodes[i].output_y;
-                                } else if (is_connecting && !is_connecting_from_output && i != connecting_node &&
-                                        !nodes[i].is_output_connected) {
-                                    // Complete connection from input to output
-                                    nodes[connecting_node].connected_to = i;
-                                    nodes[connecting_node].is_input_connected = true;
-                                    nodes[i].is_output_connected = true;
-                                    is_connecting = false;
-                                    connecting_node = -1;
-                                    is_connecting_from_output = false;
-                                }
+                    if (connectingNode == -1) {
+                        for (int i = nodeCount - 1; i >= 0; i--) {
+                            if (worldX >= nodes[i].x && worldX <= nodes[i].x + nodes[i].width &&
+                                worldY >= nodes[i].y && worldY <= nodes[i].y + HEADER_HEIGHT) {
+                                draggedNode = i;
+                                dragOffsetX = worldX - nodes[i].x;
+                                dragOffsetY = worldY - nodes[i].y;
+                                printf("Dragging %s at (%.0f, %.0f)\n", nodes[i].name, nodes[i].x, nodes[i].y);
+                                nodes[i].inputX = nodes[i].x;
+                                nodes[i].inputY = nodes[i].y + HEADER_HEIGHT + (nodes[i].height - HEADER_HEIGHT) / 2;
+                                nodes[i].outputX = nodes[i].x + nodes[i].width;
+                                nodes[i].outputY = nodes[i].inputY;
                                 break;
                             }
                         }
                     }
+                }
+                else if (event.button.button == SDL_BUTTON_RIGHT) {
+                    if (nodeCount < MAX_NODES) {
+                        nodes[nodeCount].x = worldX;
+                        nodes[nodeCount].y = worldY;
+                        nodes[nodeCount].width = 100.0f;
+                        nodes[nodeCount].height = 100.0f;
+                        snprintf(nodes[nodeCount].name, sizeof(nodes[nodeCount].name), "Node %d", nodeCount);
+                        nodes[nodeCount].inputX = nodes[nodeCount].x;
+                        nodes[nodeCount].inputY = nodes[nodeCount].y + HEADER_HEIGHT + (nodes[nodeCount].height - HEADER_HEIGHT) / 2;
+                        nodes[nodeCount].outputX = nodes[nodeCount].x + nodes[nodeCount].width;
+                        nodes[nodeCount].outputY = nodes[nodeCount].inputY;
 
-                    // Cancel connection if clicking elsewhere
-                    if (is_connecting && !is_dragging) {
-                        bool hit_input_or_output = false;
-                        for (int i = 0; i < node_count; i++) {
-                            if ((mouse_x >= nodes[i].input_x - nodes[i].io_width / 2.0f &&
-                                mouse_x <= nodes[i].input_x + nodes[i].io_width / 2.0f &&
-                                mouse_y >= nodes[i].input_y - nodes[i].io_height / 2.0f &&
-                                mouse_y <= nodes[i].input_y + nodes[i].io_height / 2.0f) ||
-                                (mouse_x >= nodes[i].output_x - nodes[i].io_width / 2.0f &&
-                                mouse_x <= nodes[i].output_x + nodes[i].io_width / 2.0f &&
-                                mouse_y >= nodes[i].output_y - nodes[i].io_height / 2.0f &&
-                                mouse_y <= nodes[i].output_y + nodes[i].io_height / 2.0f)) {
-                                hit_input_or_output = true;
+                        SDL_Color textColor = {255, 255, 255, 255};
+                        SDL_Surface* textSurface = TTF_RenderText_Blended(font, nodes[nodeCount].name, strlen(nodes[nodeCount].name), textColor);
+                        if (!textSurface) {
+                            printf("Failed to render text for %s: %s\n", nodes[nodeCount].name, SDL_GetError());
+                        } else {
+                            SDL_Surface* convertedSurface = SDL_ConvertSurface(textSurface, SDL_PIXELFORMAT_RGBA32);
+                            if (!convertedSurface) {
+                                printf("Failed to convert surface for %s: %s\n", nodes[nodeCount].name, SDL_GetError());
+                                SDL_DestroySurface(textSurface);
+                            } else {
+                                glGenTextures(1, &textTextures[nodeCount]);
+                                glBindTexture(GL_TEXTURE_2D, textTextures[nodeCount]);
+                                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, convertedSurface->w, convertedSurface->h, 0, GL_RGBA, GL_UNSIGNED_BYTE, convertedSurface->pixels);
+                                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+                                textWidths[nodeCount] = (float)convertedSurface->w;
+                                textHeights[nodeCount] = (float)convertedSurface->h;
+
+                                SDL_DestroySurface(convertedSurface);
+                                SDL_DestroySurface(textSurface);
+
+                                printf("Added %s at (%.0f, %.0f)\n", nodes[nodeCount].name, nodes[nodeCount].x, nodes[nodeCount].y);
+                                nodeCount++;
+                                updateCameraText = true;
+                            }
+                        }
+                    } else {
+                        printf("Cannot add node: Maximum node count (%d) reached\n", MAX_NODES);
+                    }
+                }
+                else if (event.button.button == SDL_BUTTON_MIDDLE) {
+                    panning = true;
+                    panStartX = mouseX;
+                    panStartY = mouseY;
+                }
+            }
+            else if (event.type == SDL_EVENT_MOUSE_BUTTON_UP) {
+                if (event.button.button == SDL_BUTTON_LEFT) {
+                    if (connectingNode != -1) {
+                        float mouseX = event.button.x;
+                        float mouseY = event.button.y;
+                        float worldX = (mouseX + camera.x) / camera.scale;
+                        float worldY = (mouseY + camera.y) / camera.scale;
+                        for (int i = 0; i < nodeCount; i++) {
+                            if (i == connectingNode) continue;
+                            float dx = worldX - nodes[i].inputX;
+                            float dy = worldY - nodes[i].inputY;
+                            if (dx * dx + dy * dy <= SLOT_RADIUS * SLOT_RADIUS / (camera.scale * camera.scale)) {
+                                bool inputUsed = false;
+                                for (int j = 0; j < connectionCount; j++) {
+                                    if (connections[j].toNode == i) {
+                                        inputUsed = true;
+                                        break;
+                                    }
+                                }
+                                if (!inputUsed && connectionCount < MAX_CONNECTIONS) {
+                                    connections[connectionCount].fromNode = connectingNode;
+                                    connections[connectionCount].toNode = i;
+                                    connectionCount++;
+                                    printf("Connected %s to %s\n", nodes[connectingNode].name, nodes[i].name);
+                                    updateCameraText = true;
+                                }
                                 break;
                             }
                         }
-                        if (!hit_input_or_output) {
-                            is_connecting = false;
-                            connecting_node = -1;
-                            is_connecting_from_output = false;
+                        connectingNode = -1;
+                    }
+                    if (draggedNode != -1) {
+                        printf("Dropped %s at (%.0f, %.0f)\n", nodes[draggedNode].name, nodes[draggedNode].x, nodes[draggedNode].y);
+                        draggedNode = -1;
+                    }
+                }
+                else if (event.button.button == SDL_BUTTON_MIDDLE) {
+                    if (panning) {
+                        float mouseX = event.button.x;
+                        float mouseY = event.button.y;
+                        if (fabs(mouseX - panStartX) < 2 && fabs(mouseY - panStartY) < 2) {
+                            float worldX = (mouseX + camera.x) / camera.scale;
+                            float worldY = (mouseY + camera.y) / camera.scale;
+                            for (int i = 0; i < connectionCount; i++) {
+                                float x1 = nodes[connections[i].fromNode].outputX;
+                                float y1 = nodes[connections[i].fromNode].outputY;
+                                float x2 = nodes[connections[i].toNode].inputX;
+                                float y2 = nodes[connections[i].toNode].inputY;
+
+                                float dx = x2 - x1;
+                                float dy = y2 - y1;
+                                float len_sq = dx * dx + dy * dy;
+                                if (len_sq == 0) continue;
+
+                                float t = ((worldX - x1) * dx + (worldY - y1) * dy) / len_sq;
+                                t = fmaxf(0, fminf(1, t));
+                                float projX = x1 + t * dx;
+                                float projY = y1 + t * dy;
+                                float dist = sqrtf((worldX - projX) * (worldX - projX) + (worldY - projY) * (worldY - projY));
+
+                                if (dist <= DISCONNECT_DISTANCE / camera.scale) {
+                                    printf("Disconnected %s from %s\n", nodes[connections[i].fromNode].name, nodes[connections[i].toNode].name);
+                                    for (int j = i; j < connectionCount - 1; j++) {
+                                        connections[j] = connections[j + 1];
+                                    }
+                                    connectionCount--;
+                                    i--;
+                                    updateCameraText = true;
+                                }
+                            }
                         }
+                        panning = false;
+                        printf("Panned to (%.2f, %.2f)\n", camera.x, camera.y);
+                        updateCameraText = true;
                     }
                 }
             }
-            if (event.type == SDL_EVENT_MOUSE_BUTTON_UP) {
-                if (event.button.button == SDL_BUTTON_LEFT) {
-                    is_dragging = false;
-                    dragging_node = -1;
+            else if (event.type == SDL_EVENT_MOUSE_MOTION) {
+                if (draggedNode != -1) {
+                    float mouseX = event.motion.x;
+                    float mouseY = event.motion.y;
+                    float worldX = (mouseX + camera.x) / camera.scale;
+                    float worldY = (mouseY + camera.y) / camera.scale;
+                    nodes[draggedNode].x = worldX - dragOffsetX;
+                    nodes[draggedNode].y = worldY - dragOffsetY;
+                    nodes[draggedNode].inputX = nodes[draggedNode].x;
+                    nodes[draggedNode].inputY = nodes[draggedNode].y + HEADER_HEIGHT + (nodes[draggedNode].height - HEADER_HEIGHT) / 2;
+                    nodes[draggedNode].outputX = nodes[draggedNode].x + nodes[draggedNode].width;
+                    nodes[draggedNode].outputY = nodes[draggedNode].inputY;
+                    updateCameraText = true;
                 }
-            }
-            if (event.type == SDL_EVENT_MOUSE_MOTION && is_dragging) {
-                int win_w, win_h;
-                SDL_GetWindowSize(window, &win_w, &win_h);
-                float mouse_x = (2.0f * event.motion.x / win_w) - 1.0f;
-                float mouse_y = 1.0f - (2.0f * event.motion.y / win_h);
-                nodes[dragging_node].x = mouse_x + drag_offset_x;
-                nodes[dragging_node].y = mouse_y + drag_offset_y;
-                nodes[dragging_node].input_x = nodes[dragging_node].x - nodes[dragging_node].width / 2.0f - nodes[dragging_node].io_width / 2.0f;
-                nodes[dragging_node].input_y = nodes[dragging_node].y;
-                nodes[dragging_node].output_x = nodes[dragging_node].x + nodes[dragging_node].width / 2.0f + nodes[dragging_node].io_width / 2.0f;
-                nodes[dragging_node].output_y = nodes[dragging_node].y;
-                update_node_vertices(dragging_node);
-            }
-            if (event.type == SDL_EVENT_MOUSE_MOTION && is_connecting) {
-                int win_w, win_h;
-                SDL_GetWindowSize(window, &win_w, &win_h);
-                connecting_x = (2.0f * event.motion.x / win_w) - 1.0f;
-                connecting_y = 1.0f - (2.0f * event.motion.y / win_h);
+                else if (panning) {
+                    float mouseX = event.motion.x;
+                    float mouseY = event.motion.y;
+                    camera.x -= (mouseX - panStartX);
+                    camera.y -= (mouseY - panStartY);
+                    panStartX = mouseX;
+                    panStartY = mouseY;
+                    updateCameraText = true;
+                }
             }
         }
 
-        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        if (updateCameraText) {
+            if (cameraTextTexture) glDeleteTextures(1, &cameraTextTexture); // Fixed: Correct glDeleteTextures call
+            cameraTextTexture = 0; // Reset to avoid dangling ID
+            char buffer[64];
+            snprintf(buffer, sizeof(buffer), "Camera: (%.0f, %.0f) Zoom: %.2f", camera.x, camera.y, camera.scale);
+            SDL_Color textColor = {255, 255, 255, 255};
+            SDL_Surface* textSurface = TTF_RenderText_Blended(font, buffer, strlen(buffer), textColor);
+            if (textSurface) {
+                SDL_Surface* convertedSurface = SDL_ConvertSurface(textSurface, SDL_PIXELFORMAT_RGBA32);
+                if (convertedSurface) {
+                    glGenTextures(1, &cameraTextTexture);
+                    glBindTexture(GL_TEXTURE_2D, cameraTextTexture);
+                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, convertedSurface->w, convertedSurface->h, 0, GL_RGBA, GL_UNSIGNED_BYTE, convertedSurface->pixels);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+                    cameraTextWidth = (float)convertedSurface->w;
+                    cameraTextHeight = (float)convertedSurface->h;
+
+                    SDL_DestroySurface(convertedSurface);
+                }
+                SDL_DestroySurface(textSurface);
+            }
+            updateCameraText = false;
+        }
+
+        glClearColor(0.2f, 0.2f, 0.2f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
 
-        // Draw all nodes
-        glUseProgram(shader_program);
-        GLint color_loc = glGetUniformLocation(shader_program, "color");
-        for (int i = 0; i < node_count; i++) {
-            update_node_vertices(i); // Ensure vertices are up-to-date
-            // Draw main square (blue)
-            glUniform3f(color_loc, 0.0f, 0.0f, 1.0f);
-            glBindVertexArray(nodes[i].vao);
-            glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
-            glBindVertexArray(0);
+        glUseProgram(shaderProgram);
+        glBindVertexArray(VAO);
+        if (connectionCount > 0 || connectingNode != -1) {
+            float lineVertices[4 * 4];
+            glUniform1i(useTextureLoc, 0);
+            glUniform1i(isCircleLoc, 0);
+            glUniform3f(colorLoc, 1.0f, 1.0f, 1.0f);
 
-            // Draw input rectangle (green)
-            glUniform3f(color_loc, 0.0f, 1.0f, 0.0f);
-            glBindVertexArray(nodes[i].input_vao);
-            glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
-            glBindVertexArray(0);
+            for (int i = 0; i < connectionCount; i++) {
+                float x1 = (nodes[connections[i].fromNode].outputX * camera.scale - camera.x) / WINDOW_WIDTH * 2 - 1;
+                float y1 = 1 - ((nodes[connections[i].fromNode].outputY * camera.scale - camera.y) / WINDOW_HEIGHT * 2);
+                float x2 = (nodes[connections[i].toNode].inputX * camera.scale - camera.x) / WINDOW_WIDTH * 2 - 1;
+                float y2 = 1 - ((nodes[connections[i].toNode].inputY * camera.scale - camera.y) / WINDOW_HEIGHT * 2);
+                lineVertices[0] = x1;
+                lineVertices[1] = y1;
+                lineVertices[2] = 0.0f;
+                lineVertices[3] = 0.0f;
+                lineVertices[4] = x2;
+                lineVertices[5] = y2;
+                lineVertices[6] = 0.0f;
+                lineVertices[7] = 0.0f;
 
-            // Draw output rectangle (red)
-            glUniform3f(color_loc, 1.0f, 0.0f, 0.0f);
-            glBindVertexArray(nodes[i].output_vao);
-            glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
-            glBindVertexArray(0);
-        }
+                glBufferData(GL_ARRAY_BUFFER, sizeof(lineVertices), lineVertices, GL_STATIC_DRAW);
+                glDrawArrays(GL_LINES, 0, 2);
+            }
 
-        // Draw connections
-        glUseProgram(line_shader_program);
-        glBindVertexArray(line_vao);
-        for (int i = 0; i < node_count; i++) {
-            if (nodes[i].connected_to != -1) {
-                float line_vertices[] = {
-                    nodes[i].input_x, nodes[i].input_y, 0.0f,
-                    nodes[nodes[i].connected_to].output_x, nodes[nodes[i].connected_to].output_y, 0.0f
-                };
-                glBindBuffer(GL_ARRAY_BUFFER, line_vbo);
-                glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(line_vertices), line_vertices);
+            if (connectingNode != -1) {
+                float mouseX, mouseY;
+                SDL_GetMouseState(&mouseX, &mouseY);
+                float x1 = (connectStartX * camera.scale - camera.x) / WINDOW_WIDTH * 2 - 1;
+                float y1 = 1 - ((connectStartY * camera.scale - camera.y) / WINDOW_HEIGHT * 2);
+                float x2 = mouseX / WINDOW_WIDTH * 2 - 1;
+                float y2 = 1 - (mouseY / WINDOW_HEIGHT * 2);
+                lineVertices[0] = x1;
+                lineVertices[1] = y1;
+                lineVertices[2] = 0.0f;
+                lineVertices[3] = 0.0f;
+                lineVertices[4] = x2;
+                lineVertices[5] = y2;
+                lineVertices[6] = 0.0f;
+                lineVertices[7] = 0.0f;
+
+                glBufferData(GL_ARRAY_BUFFER, sizeof(lineVertices), lineVertices, GL_STATIC_DRAW);
                 glDrawArrays(GL_LINES, 0, 2);
             }
         }
-        if (is_connecting) {
-            float line_vertices[] = {
-                is_connecting_from_output ? nodes[connecting_node].output_x : nodes[connecting_node].input_x,
-                is_connecting_from_output ? nodes[connecting_node].output_y : nodes[connecting_node].input_y,
-                0.0f,
-                connecting_x, connecting_y, 0.0f
-            };
-            glBindBuffer(GL_ARRAY_BUFFER, line_vbo);
-            glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(line_vertices), line_vertices);
-            glDrawArrays(GL_LINES, 0, 2);
-        }
-        glBindVertexArray(0);
 
-        // Render node names and "Hello World"
-        float text_color[3] = {1.0f, 1.0f, 1.0f};
-        for (int i = 0; i < node_count; i++) {
-            // Convert NDC to pixel coordinates for text positioning
-            int win_w, win_h;
-            SDL_GetWindowSize(window, &win_w, &win_h);
-            float pixel_x = (nodes[i].x - nodes[i].width / 2.0f + 1.0f) * win_w / 2.0f + 10.0f; // Offset slightly inside square
-            float pixel_y = (1.0f - (nodes[i].y + nodes[i].height / 2.0f)) * win_h / 2.0f + 10.0f; // Top-left of square
-            render_text(nodes[i].name, pixel_x, pixel_y, 0.5f, text_color); // Smaller scale for node names
+        for (int i = 0; i < nodeCount; i++) {
+            float scaledWidth = nodes[i].width * camera.scale;
+            float scaledHeight = nodes[i].height * camera.scale;
+            float scaledX = nodes[i].x * camera.scale - camera.x;
+            float scaledY = nodes[i].y * camera.scale - camera.y;
+            float bodyVertices[] = {
+                scaledX / WINDOW_WIDTH * 2 - 1, 1 - scaledY / WINDOW_HEIGHT * 2, 0.0f, 0.0f,
+                scaledX / WINDOW_WIDTH * 2 - 1, 1 - (scaledY + scaledHeight) / WINDOW_HEIGHT * 2, 0.0f, 0.0f,
+                (scaledX + scaledWidth) / WINDOW_WIDTH * 2 - 1, 1 - (scaledY + scaledHeight) / WINDOW_HEIGHT * 2, 0.0f, 0.0f,
+                (scaledX + scaledWidth) / WINDOW_WIDTH * 2 - 1, 1 - scaledY / WINDOW_HEIGHT * 2, 0.0f, 0.0f
+            };
+            unsigned int indices[] = {0, 1, 2, 2, 3, 0};
+
+            glBufferData(GL_ARRAY_BUFFER, sizeof(bodyVertices), bodyVertices, GL_STATIC_DRAW);
+            glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
+
+            glUniform1i(useTextureLoc, 0);
+            glUniform1i(isCircleLoc, 0);
+            glUniform3f(colorLoc, 0.0f, 0.0f, 1.0f);
+            glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+
+            float scaledHeaderHeight = HEADER_HEIGHT * camera.scale;
+            float headerVertices[] = {
+                scaledX / WINDOW_WIDTH * 2 - 1, 1 - scaledY / WINDOW_HEIGHT * 2, 0.0f, 0.0f,
+                scaledX / WINDOW_WIDTH * 2 - 1, 1 - (scaledY + scaledHeaderHeight) / WINDOW_HEIGHT * 2, 0.0f, 0.0f,
+                (scaledX + scaledWidth) / WINDOW_WIDTH * 2 - 1, 1 - (scaledY + scaledHeaderHeight) / WINDOW_HEIGHT * 2, 0.0f, 0.0f,
+                (scaledX + scaledWidth) / WINDOW_WIDTH * 2 - 1, 1 - scaledY / WINDOW_HEIGHT * 2, 0.0f, 0.0f
+            };
+            glBufferData(GL_ARRAY_BUFFER, sizeof(headerVertices), headerVertices, GL_STATIC_DRAW);
+            glUniform3f(colorLoc, 0.5f, 0.5f, 0.5f);
+            glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+
+            float scaledSlotRadius = SLOT_RADIUS * camera.scale;
+            float scaledSlotSize = scaledSlotRadius * 2;
+            float scaledInputX = nodes[i].inputX * camera.scale - camera.x;
+            float scaledInputY = nodes[i].inputY * camera.scale - camera.y;
+            float inputVertices[] = {
+                (scaledInputX - scaledSlotRadius) / WINDOW_WIDTH * 2 - 1, 1 - (scaledInputY - scaledSlotRadius) / WINDOW_HEIGHT * 2, 0.0f, 0.0f,
+                (scaledInputX - scaledSlotRadius) / WINDOW_WIDTH * 2 - 1, 1 - (scaledInputY + scaledSlotRadius) / WINDOW_HEIGHT * 2, 0.0f, 1.0f,
+                (scaledInputX + scaledSlotRadius) / WINDOW_WIDTH * 2 - 1, 1 - (scaledInputY + scaledSlotRadius) / WINDOW_HEIGHT * 2, 1.0f, 1.0f,
+                (scaledInputX + scaledSlotRadius) / WINDOW_WIDTH * 2 - 1, 1 - (scaledInputY - scaledSlotRadius) / WINDOW_HEIGHT * 2, 1.0f, 0.0f
+            };
+            glBufferData(GL_ARRAY_BUFFER, sizeof(inputVertices), inputVertices, GL_STATIC_DRAW);
+            glUniform1i(useTextureLoc, 0);
+            glUniform1i(isCircleLoc, 1);
+            glUniform3f(colorLoc, 0.0f, 1.0f, 0.0f);
+            glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+
+            float scaledOutputX = nodes[i].outputX * camera.scale - camera.x;
+            float scaledOutputY = nodes[i].outputY * camera.scale - camera.y;
+            float outputVertices[] = {
+                (scaledOutputX - scaledSlotRadius) / WINDOW_WIDTH * 2 - 1, 1 - (scaledOutputY - scaledSlotRadius) / WINDOW_HEIGHT * 2, 0.0f, 0.0f,
+                (scaledOutputX - scaledSlotRadius) / WINDOW_WIDTH * 2 - 1, 1 - (scaledOutputY + scaledSlotRadius) / WINDOW_HEIGHT * 2, 0.0f, 1.0f,
+                (scaledOutputX + scaledSlotRadius) / WINDOW_WIDTH * 2 - 1, 1 - (scaledOutputY + scaledSlotRadius) / WINDOW_HEIGHT * 2, 1.0f, 1.0f,
+                (scaledOutputX + scaledSlotRadius) / WINDOW_WIDTH * 2 - 1, 1 - (scaledOutputY - scaledSlotRadius) / WINDOW_HEIGHT * 2, 1.0f, 0.0f
+            };
+            glBufferData(GL_ARRAY_BUFFER, sizeof(outputVertices), outputVertices, GL_STATIC_DRAW);
+            glUniform3f(colorLoc, 1.0f, 0.0f, 0.0f);
+            glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+
+            float scaledTextX = (nodes[i].x + 5) * camera.scale - camera.x;
+            float scaledTextY = (nodes[i].y + 4) * camera.scale - camera.y;
+            float scaledTextWidth = textWidths[i] * camera.scale;
+            float scaledTextHeight = textHeights[i] * camera.scale;
+            float textVertices[] = {
+                scaledTextX / WINDOW_WIDTH * 2 - 1, 1 - scaledTextY / WINDOW_HEIGHT * 2, 0.0f, 0.0f,
+                scaledTextX / WINDOW_WIDTH * 2 - 1, 1 - (scaledTextY + scaledTextHeight) / WINDOW_HEIGHT * 2, 0.0f, 1.0f,
+                (scaledTextX + scaledTextWidth) / WINDOW_WIDTH * 2 - 1, 1 - (scaledTextY + scaledTextHeight) / WINDOW_HEIGHT * 2, 1.0f, 1.0f,
+                (scaledTextX + scaledTextWidth) / WINDOW_WIDTH * 2 - 1, 1 - scaledTextY / WINDOW_HEIGHT * 2, 1.0f, 0.0f
+            };
+            glBufferData(GL_ARRAY_BUFFER, sizeof(textVertices), textVertices, GL_STATIC_DRAW);
+            glUniform1i(useTextureLoc, 1);
+            glUniform1i(isCircleLoc, 0);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, textTextures[i]);
+            glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+
+            if (i == draggedNode) {
+                float scaledBorderOffset = BORDER_OFFSET * camera.scale;
+                float borderVertices[] = {
+                    (scaledX - scaledBorderOffset) / WINDOW_WIDTH * 2 - 1, 1 - (scaledY - scaledBorderOffset) / WINDOW_HEIGHT * 2, 0.0f, 0.0f,
+                    (scaledX - scaledBorderOffset) / WINDOW_WIDTH * 2 - 1, 1 - (scaledY + scaledHeight + scaledBorderOffset) / WINDOW_HEIGHT * 2, 0.0f, 0.0f,
+                    (scaledX + scaledWidth + scaledBorderOffset) / WINDOW_WIDTH * 2 - 1, 1 - (scaledY + scaledHeight + scaledBorderOffset) / WINDOW_HEIGHT * 2, 0.0f, 0.0f,
+                    (scaledX + scaledWidth + scaledBorderOffset) / WINDOW_WIDTH * 2 - 1, 1 - (scaledY - scaledBorderOffset) / WINDOW_HEIGHT * 2, 0.0f, 0.0f
+                };
+                glBufferData(GL_ARRAY_BUFFER, sizeof(borderVertices), borderVertices, GL_STATIC_DRAW);
+                glUniform1i(useTextureLoc, 0);
+                glUniform1i(isCircleLoc, 0);
+                glUniform3f(colorLoc, 1.0f, 1.0f, 0.0f);
+                glDrawArrays(GL_LINE_LOOP, 0, 4);
+            }
         }
-        render_text("Hello World", 50.0f, 50.0f, 1.0f, text_color);
+
+        if (connectingNode != -1) {
+            float scaledOutlineRadius = OUTLINE_RADIUS * camera.scale;
+            float outlineSize = scaledOutlineRadius * 2;
+            float scaledConnectX = connectStartX * camera.scale - camera.x;
+            float scaledConnectY = connectStartY * camera.scale - camera.y;
+            float outputOutlineVertices[] = {
+                (scaledConnectX - scaledOutlineRadius) / WINDOW_WIDTH * 2 - 1, 1 - (scaledConnectY - scaledOutlineRadius) / WINDOW_HEIGHT * 2, 0.0f, 0.0f,
+                (scaledConnectX - scaledOutlineRadius) / WINDOW_WIDTH * 2 - 1, 1 - (scaledConnectY + scaledOutlineRadius) / WINDOW_HEIGHT * 2, 0.0f, 1.0f,
+                (scaledConnectX + scaledOutlineRadius) / WINDOW_WIDTH * 2 - 1, 1 - (scaledConnectY + scaledOutlineRadius) / WINDOW_HEIGHT * 2, 1.0f, 1.0f,
+                (scaledConnectX + scaledOutlineRadius) / WINDOW_WIDTH * 2 - 1, 1 - (scaledConnectY - scaledOutlineRadius) / WINDOW_HEIGHT * 2, 1.0f, 0.0f
+            };
+            glBufferData(GL_ARRAY_BUFFER, sizeof(outputOutlineVertices), outputOutlineVertices, GL_STATIC_DRAW);
+            glUniform1i(useTextureLoc, 0);
+            glUniform1i(isCircleLoc, 1);
+            glUniform3f(colorLoc, 1.0f, 1.0f, 1.0f);
+            glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+
+            float mouseX, mouseY;
+            SDL_GetMouseState(&mouseX, &mouseY);
+            float worldX = (mouseX + camera.x) / camera.scale;
+            float worldY = (mouseY + camera.y) / camera.scale;
+            for (int i = 0; i < nodeCount; i++) {
+                if (i == connectingNode) continue;
+                float dx = worldX - nodes[i].inputX;
+                float dy = worldY - nodes[i].inputY;
+                if (dx * dx + dy * dy <= SLOT_RADIUS * SLOT_RADIUS / (camera.scale * camera.scale)) {
+                    float scaledInputX = nodes[i].inputX * camera.scale - camera.x;
+                    float scaledInputY = nodes[i].inputY * camera.scale - camera.y;
+                    float inputOutlineVertices[] = {
+                        (scaledInputX - scaledOutlineRadius) / WINDOW_WIDTH * 2 - 1, 1 - (scaledInputY - scaledOutlineRadius) / WINDOW_HEIGHT * 2, 0.0f, 0.0f,
+                        (scaledInputX - scaledOutlineRadius) / WINDOW_WIDTH * 2 - 1, 1 - (scaledInputY + scaledOutlineRadius) / WINDOW_HEIGHT * 2, 0.0f, 1.0f,
+                        (scaledInputX + scaledOutlineRadius) / WINDOW_WIDTH * 2 - 1, 1 - (scaledInputY + scaledOutlineRadius) / WINDOW_HEIGHT * 2, 1.0f, 1.0f,
+                        (scaledInputX + scaledOutlineRadius) / WINDOW_WIDTH * 2 - 1, 1 - (scaledInputY - scaledOutlineRadius) / WINDOW_HEIGHT * 2, 1.0f, 0.0f
+                    };
+                    glBufferData(GL_ARRAY_BUFFER, sizeof(inputOutlineVertices), inputOutlineVertices, GL_STATIC_DRAW);
+                    glUniform3f(colorLoc, 1.0f, 1.0f, 0);
+                    glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+                }
+            }
+        }
+
+        if (cameraTextTexture) {
+            float textVertices[] = {
+                10.0f / WINDOW_WIDTH * 2 - 1, 1 - 10.0f / WINDOW_HEIGHT * 2, 0.0f, 0.0f,
+                10.0f / WINDOW_WIDTH * 2 - 1, 1 - (10.0f + cameraTextHeight) / WINDOW_HEIGHT * 2, 0.0f, 0.0f,
+                (10.0f + cameraTextWidth) / WINDOW_WIDTH * 2 - 1, 1 - (10.0f + cameraTextHeight) / WINDOW_HEIGHT * 2, 1.0f, 1.0f,
+                (10.0f + cameraTextWidth) / WINDOW_WIDTH * 2 - 1, 1 - 10.0f / WINDOW_HEIGHT * 2, 1.0f, 0.0f
+            };
+            glBufferData(GL_ARRAY_BUFFER, sizeof(textVertices), textVertices, GL_STATIC_DRAW);
+            glUniform1i(useTextureLoc, 1);
+            glUniform1i(isCircleLoc, 0);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, cameraTextTexture);
+            glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+        }
 
         SDL_GL_SwapWindow(window);
     }
 
-    // Clean up FreeType resources
-    for (int i = 0; i < 128; i++) {
-        glDeleteTextures(1, &characters[i].texture_id);
+    for (int i = 0; i < nodeCount; i++) {
+        glDeleteTextures(1, &textTextures[i]);
     }
-    FT_Done_Face(face);
-    FT_Done_FreeType(ft);
-
-    // Clean up FreeType resources
-    for (int i = 0; i < 128; i++) {
-        glDeleteTextures(1, &characters[i].texture_id);
-    }
-    FT_Done_Face(face);
-    FT_Done_FreeType(ft);
-
-    // Clean up FreeType resources
-    for (int i = 0; i < 128; i++) {
-        glDeleteTextures(1, &characters[i].texture_id);
-    }
-    FT_Done_Face(face);
-    FT_Done_FreeType(ft);
-
-    // Clean up OpenGL resources
-    for (int i = 0; i < node_count; i++) {
-        glDeleteVertexArrays(1, &nodes[i].vao);
-        glDeleteBuffers(1, &nodes[i].vbo);
-        glDeleteVertexArrays(1, &nodes[i].input_vao);
-        glDeleteBuffers(1, &nodes[i].input_vbo);
-        glDeleteVertexArrays(1, &nodes[i].output_vao);
-        glDeleteBuffers(1, &nodes[i].output_vbo);
-    }
-    glDeleteVertexArrays(1, &line_vao);
-    glDeleteBuffers(1, &line_vbo);
-    glDeleteProgram(shader_program);
-    glDeleteProgram(line_shader_program);
-    glDeleteVertexArrays(1, &text_vao);
-    glDeleteBuffers(1, &text_vbo);
-    glDeleteProgram(text_shader_program);
-    SDL_GL_DestroyContext(gl_context);
+    if (cameraTextTexture) glDeleteTextures(1, &cameraTextTexture); // Fixed: Correct cleanup
+    glDeleteVertexArrays(1, &VAO);
+    glDeleteBuffers(1, &VBO);
+    glDeleteBuffers(1, &EBO);
+    glDeleteProgram(shaderProgram);
+    TTF_CloseFont(font);
+    SDL_GL_DestroyContext(glContext);
     SDL_DestroyWindow(window);
+    TTF_Quit();
     SDL_Quit();
+
     return 0;
 }
-
-//
