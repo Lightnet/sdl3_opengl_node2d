@@ -8,6 +8,7 @@
 
 #define MAX_NODES 10
 #define MAX_PORTS 20 // Cap on inputs and outputs per node
+#define MAX_CONNECTIONS 50 // Max connections to prevent overflow
 
 /* We will use this renderer to draw into this window every frame. */
 static SDL_Window *window = NULL;
@@ -29,10 +30,24 @@ typedef struct {
     float drag_offset_x, drag_offset_y;
 } Node;
 
-/* Global node array */
+/* Connection structure */
+typedef struct {
+    int output_node_idx; // Index of node with output port
+    int output_port_idx; // Index of output port
+    int input_node_idx;  // Index of node with input port
+    int input_port_idx;  // Index of input port
+} Connection;
+
+/* Global state */
 static Node nodes[MAX_NODES];
 static int num_nodes = 0;
 static Uint32 indices[6] = {0, 1, 2, 0, 2, 3};
+static Connection connections[MAX_CONNECTIONS];
+static int num_connections = 0;
+static bool is_connecting = false;
+static int start_node_idx = -1;
+static int start_port_idx = -1;
+static float connect_start_x, connect_start_y; // Start of active connection line
 
 /* Initialize a node */
 void init_node(Node *node, float x, float y, const char *name, int num_inputs, int num_outputs) {
@@ -67,11 +82,34 @@ bool is_point_in_node(const Node *node, float mx, float my) {
     return mx >= x_min && mx <= x_max && my >= y_min && my <= y_max;
 }
 
+/* Check if a point is inside an output port square */
+bool is_point_in_output_port(const Node *node, int port_idx, float mx, float my) {
+    float x = node->x + 110.0f;
+    float y = node->y + 30.0f + port_idx * 20.0f;
+    return mx >= x && mx <= x + 10.0f && my >= y && my <= y + 10.0f;
+}
+
+/* Check if a point is inside an input port square */
+bool is_point_in_input_port(const Node *node, int port_idx, float mx, float my) {
+    float x = node->x - 20.0f;
+    float y = node->y + 30.0f + port_idx * 20.0f;
+    return mx >= x && mx <= x + 10.0f && my >= y && my <= y + 10.0f;
+}
+
 /* Update node position during drag */
 void update_node_position(Node *node, float mx, float my) {
+    // Update position using stored offset
     node->x = mx - node->drag_offset_x;
     node->y = my - node->drag_offset_y;
-    init_node(node, node->x, node->y, node->name, node->num_inputs, node->num_outputs);
+    // Update vertices directly
+    node->vertices[0].position.x = node->x;
+    node->vertices[0].position.y = node->y;
+    node->vertices[1].position.x = node->x + 100.0f;
+    node->vertices[1].position.y = node->y;
+    node->vertices[2].position.x = node->x + 100.0f;
+    node->vertices[2].position.y = node->y + 100.0f;
+    node->vertices[3].position.x = node->x;
+    node->vertices[3].position.y = node->y + 100.0f;
 }
 
 /* Render text textures for a node */
@@ -132,6 +170,27 @@ void draw_port_squares(const Node *node) {
     }
 }
 
+/* Draw connections */
+void draw_connections(void) {
+    SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255); // White lines
+    for (int i = 0; i < num_connections; i++) {
+        Connection *conn = &connections[i];
+        Node *output_node = &nodes[conn->output_node_idx];
+        Node *input_node = &nodes[conn->input_node_idx];
+        float x1 = output_node->x + 115.0f; // Center of output port
+        float y1 = output_node->y + 35.0f + conn->output_port_idx * 20.0f;
+        float x2 = input_node->x - 15.0f; // Center of input port
+        float y2 = input_node->y + 35.0f + conn->input_port_idx * 20.0f;
+        SDL_RenderLine(renderer, x1, y1, x2, y2);
+    }
+    // Draw active connection line (yellow)
+    if (is_connecting) {
+        SDL_SetRenderDrawColor(renderer, 255, 255, 0, 255); // Yellow
+        SDL_RenderLine(renderer, connect_start_x, connect_start_y, 
+                       connect_start_x, connect_start_y); // Will update with mouse pos
+    }
+}
+
 int main(int argc, char *argv[]) {
     printf("SDL3 freetype\n");
     // Initialize SDL and SDL_ttf
@@ -180,6 +239,7 @@ int main(int argc, char *argv[]) {
     // Main loop
     bool running = true;
     Node *dragged_node = NULL; // Track the currently dragged node
+    float mouse_x = 0.0f, mouse_y = 0.0f; // Track mouse for active connection
     while (running) {
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
@@ -189,41 +249,84 @@ int main(int argc, char *argv[]) {
                     break;
                 case SDL_EVENT_MOUSE_BUTTON_DOWN:
                     if (event.button.button == SDL_BUTTON_LEFT) {
-                        float mx = event.button.x;
-                        float my = event.button.y;
-                        dragged_node = NULL; // Reset dragged node
-                        for (int i = num_nodes - 1; i >= 0; i--) { // Check topmost node first
-                            if (is_point_in_node(&nodes[i], mx, my)) {
-                                dragged_node = &nodes[i];
-                                dragged_node->is_dragging = true;
-                                // Calculate offset relative to click position within node
-                                dragged_node->drag_offset_x = mx - nodes[i].x;
-                                dragged_node->drag_offset_y = my - nodes[i].y;
-                                // Log for debugging
-                                printf("Start dragging %s at offset (%f, %f)\n", nodes[i].name, 
-                                       dragged_node->drag_offset_x, dragged_node->drag_offset_y);
-                                break; // Only drag one node
+                        float mx = (float)event.button.x;
+                        float my = (float)event.button.y;
+                        // Check for output port click to start connection
+                        if (!is_connecting) {
+                            for (int i = 0; i < num_nodes; i++) {
+                                for (int j = 0; j < nodes[i].num_outputs; j++) {
+                                    if (is_point_in_output_port(&nodes[i], j, mx, my)) {
+                                        is_connecting = true;
+                                        start_node_idx = i;
+                                        start_port_idx = j;
+                                        connect_start_x = nodes[i].x + 115.0f;
+                                        connect_start_y = nodes[i].y + 35.0f + j * 20.0f;
+                                        printf("Start connection from Node %d, Output %d\n", i, j);
+                                        break;
+                                    }
+                                }
+                                if (is_connecting) break;
                             }
                         }
+                        // Check for input port click to complete connection
+                        if (is_connecting) {
+                            for (int i = 0; i < num_nodes; i++) {
+                                for (int j = 0; j < nodes[i].num_inputs; j++) {
+                                    if (is_point_in_input_port(&nodes[i], j, mx, my)) {
+                                        if (num_connections < MAX_CONNECTIONS) {
+                                            connections[num_connections++] = (Connection){
+                                                start_node_idx, start_port_idx, i, j
+                                            };
+                                            printf("Connected Node %d, Output %d to Node %d, Input %d\n", 
+                                                   start_node_idx, start_port_idx, i, j);
+                                        }
+                                        is_connecting = false;
+                                        start_node_idx = -1;
+                                        start_port_idx = -1;
+                                        break;
+                                    }
+                                }
+                                if (!is_connecting) break;
+                            }
+                        }
+                        // Check for node dragging if not connecting
+                        if (!is_connecting && !dragged_node) {
+                            for (int i = num_nodes - 1; i >= 0; i--) {
+                                if (is_point_in_node(&nodes[i], mx, my)) {
+                                    dragged_node = &nodes[i];
+                                    dragged_node->is_dragging = true;
+                                    dragged_node->drag_offset_x = mx - nodes[i].x;
+                                    dragged_node->drag_offset_y = my - nodes[i].y;
+                                    printf("Start dragging %s at (%f, %f), offset (%f, %f)\n", 
+                                           nodes[i].name, mx, my, 
+                                           dragged_node->drag_offset_x, dragged_node->drag_offset_y);
+                                    break;
+                                }
+                            }
+                        }
+                    } else if (event.button.button == SDL_BUTTON_RIGHT) {
+                        // Disconnect all lines on right-click
+                        num_connections = 0;
+                        printf("Disconnected all lines\n");
                     }
                     break;
                 case SDL_EVENT_MOUSE_BUTTON_UP:
                     if (event.button.button == SDL_BUTTON_LEFT) {
                         if (dragged_node) {
                             printf("Stop dragging %s\n", dragged_node->name);
+                            dragged_node->is_dragging = false;
+                            dragged_node = NULL;
                         }
-                        for (int i = 0; i < num_nodes; i++) {
-                            nodes[i].is_dragging = false;
-                        }
-                        dragged_node = NULL; // Clear dragged node
                     }
                     break;
                 case SDL_EVENT_MOUSE_MOTION:
+                    mouse_x = (float)event.motion.x;
+                    mouse_y = (float)event.motion.y;
                     if (dragged_node) {
-                        update_node_position(dragged_node, event.motion.x, event.motion.y);
-                        // Log for debugging
-                        printf("Dragging %s to (%f, %f)\n", dragged_node->name, 
-                               event.motion.x, event.motion.y);
+                        update_node_position(dragged_node, mouse_x, mouse_y);
+                        printf("Dragging %s to (%f, %f), new pos (%f, %f)\n", 
+                               dragged_node->name, mouse_x, mouse_y, 
+                               dragged_node->x, dragged_node->y);
                     }
                     break;
             }
@@ -232,6 +335,15 @@ int main(int argc, char *argv[]) {
         // Render
         SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255); // Black background
         SDL_RenderClear(renderer);
+
+        // Draw connections
+        draw_connections();
+
+        // Draw active connection line
+        if (is_connecting) {
+            SDL_SetRenderDrawColor(renderer, 255, 255, 0, 255); // Yellow
+            SDL_RenderLine(renderer, connect_start_x, connect_start_y, mouse_x, mouse_y);
+        }
 
         // Render nodes
         for (int i = 0; i < num_nodes; i++) {
