@@ -28,8 +28,9 @@ sdl3_opengl_node2d/
         - [x] Middle-click a disconnect a specific connection.            
     - [x] Node Addition: Right-click away from green squares to add a new node at the click position.
     - [x] delete. drag and delete key.
-    - [ ] Panning: Middle-click and drag to pan the view.
-    - [ ] Zooming: Scroll wheel to zoom in/out (0.5x to 2.0x), centered on the mouse cursor.
+    - [x] Panning: Middle-click hold and drag to pan the view.
+    - [x] Zooming: Scroll wheel to zoom in/out (0.5x to 2.0x), centered on the mouse cursor.
+    - [x] Grid g key to toggle snap 
     - [ ] Menus: Planned for node type selection and configuration.
     - [ ] Variables: Planned for node data storage.
     - [ ] Functions: Planned for node-based logic or scripting.

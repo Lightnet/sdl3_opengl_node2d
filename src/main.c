@@ -18,6 +18,7 @@
 #define ZOOM_MIN 0.5f
 #define ZOOM_MAX 2.0f
 #define ZOOM_STEP 0.1f
+#define GRID_SIZE 20.0f
 
 typedef struct {
     float x, y;
@@ -137,6 +138,7 @@ int main(int argc, char* argv[]) {
         glGetShaderInfoLog(vertexShader, 512, NULL, infoLog);
         printf("Vertex shader compilation failed: %s\n", infoLog);
         getchar();
+        return 1;
     }
 
     GLuint fragmentShader = glCreateShader(GL_FRAGMENT_SHADER);
@@ -148,6 +150,7 @@ int main(int argc, char* argv[]) {
         glGetShaderInfoLog(fragmentShader, 512, NULL, infoLog);
         printf("Fragment shader compilation failed: %s\n", infoLog);
         getchar();
+        return 1;
     }
 
     GLuint shaderProgram = glCreateProgram();
@@ -160,6 +163,7 @@ int main(int argc, char* argv[]) {
         glGetProgramInfoLog(shaderProgram, 512, NULL, infoLog);
         printf("Shader program linking failed: %s\n", infoLog);
         getchar();
+        return 1;
     }
     glDeleteShader(vertexShader);
     glDeleteShader(fragmentShader);
@@ -274,6 +278,7 @@ int main(int argc, char* argv[]) {
     float connectStartX, connectStartY;
     bool panning = false;
     float panStartX, panStartY;
+    bool gridSnapping = true; // New: Grid snapping toggle
 
     bool running = true;
     SDL_Event event;
@@ -311,8 +316,41 @@ int main(int argc, char* argv[]) {
                         updateCameraText = true;
                     }
                 }
+                else if (event.key.key == SDLK_PLUS || event.key.key == SDLK_EQUALS) {
+                    float mouseX, mouseY;
+                    SDL_GetMouseState(&mouseX, &mouseY);
+                    float worldX = (mouseX + camera.x) / camera.scale;
+                    float worldY = (mouseY + camera.y) / camera.scale;
+                    float oldScale = camera.scale;
+                    camera.scale = fminf(camera.scale + ZOOM_STEP, ZOOM_MAX);
+                    if (camera.scale != oldScale) {
+                        camera.x = worldX * camera.scale - mouseX;
+                        camera.y = worldY * camera.scale - mouseY;
+                        printf("Zoomed to scale %.2f\n", camera.scale);
+                        updateCameraText = true;
+                    }
+                }
+                else if (event.key.key == SDLK_MINUS) {
+                    float mouseX, mouseY;
+                    SDL_GetMouseState(&mouseX, &mouseY);
+                    float worldX = (mouseX + camera.x) / camera.scale;
+                    float worldY = (mouseY + camera.y) / camera.scale;
+                    float oldScale = camera.scale;
+                    camera.scale = fmaxf(camera.scale - ZOOM_STEP, ZOOM_MIN);
+                    if (camera.scale != oldScale) {
+                        camera.x = worldX * camera.scale - mouseX;
+                        camera.y = worldY * camera.scale - mouseY;
+                        printf("Zoomed to scale %.2f\n", camera.scale);
+                        updateCameraText = true;
+                    }
+                }
+                else if (event.key.key == SDLK_G) { // New: Toggle grid snapping
+                    gridSnapping = !gridSnapping;
+                    printf("Grid snapping %s\n", gridSnapping ? "enabled" : "disabled");
+                    updateCameraText = true;
+                }
             }
-            else if (event.type == SDL_EVENT_MOUSE_WHEEL) { // New: Mouse wheel zoom
+            else if (event.type == SDL_EVENT_MOUSE_WHEEL) {
                 float mouseX, mouseY;
                 SDL_GetMouseState(&mouseX, &mouseY);
                 float worldX = (mouseX + camera.x) / camera.scale;
@@ -368,8 +406,8 @@ int main(int argc, char* argv[]) {
                 }
                 else if (event.button.button == SDL_BUTTON_RIGHT) {
                     if (nodeCount < MAX_NODES) {
-                        nodes[nodeCount].x = worldX;
-                        nodes[nodeCount].y = worldY;
+                        nodes[nodeCount].x = gridSnapping ? roundf(worldX / GRID_SIZE) * GRID_SIZE : worldX;
+                        nodes[nodeCount].y = gridSnapping ? roundf(worldY / GRID_SIZE) * GRID_SIZE : worldY;
                         nodes[nodeCount].width = 100.0f;
                         nodes[nodeCount].height = 100.0f;
                         snprintf(nodes[nodeCount].name, sizeof(nodes[nodeCount].name), "Node %d", nodeCount);
@@ -500,8 +538,8 @@ int main(int argc, char* argv[]) {
                     float mouseY = event.motion.y;
                     float worldX = (mouseX + camera.x) / camera.scale;
                     float worldY = (mouseY + camera.y) / camera.scale;
-                    nodes[draggedNode].x = worldX - dragOffsetX;
-                    nodes[draggedNode].y = worldY - dragOffsetY;
+                    nodes[draggedNode].x = gridSnapping ? roundf((worldX - dragOffsetX) / GRID_SIZE) * GRID_SIZE : worldX - dragOffsetX;
+                    nodes[draggedNode].y = gridSnapping ? roundf((worldY - dragOffsetY) / GRID_SIZE) * GRID_SIZE : worldY - dragOffsetY;
                     nodes[draggedNode].inputX = nodes[draggedNode].x;
                     nodes[draggedNode].inputY = nodes[draggedNode].y + HEADER_HEIGHT + (nodes[draggedNode].height - HEADER_HEIGHT) / 2;
                     nodes[draggedNode].outputX = nodes[draggedNode].x + nodes[draggedNode].width;
@@ -521,10 +559,10 @@ int main(int argc, char* argv[]) {
         }
 
         if (updateCameraText) {
-            if (cameraTextTexture) glDeleteTextures(1, &cameraTextTexture); // Fixed: Correct glDeleteTextures call
-            cameraTextTexture = 0; // Reset to avoid dangling ID
+            if (cameraTextTexture) glDeleteTextures(1, &cameraTextTexture);
+            cameraTextTexture = 0;
             char buffer[64];
-            snprintf(buffer, sizeof(buffer), "Camera: (%.0f, %.0f) Zoom: %.2f", camera.x, camera.y, camera.scale);
+            snprintf(buffer, sizeof(buffer), "Camera: (%.0f, %.0f) Zoom: %.2f Snap: %s", camera.x, camera.y, camera.scale, gridSnapping ? "ON" : "OFF");
             SDL_Color textColor = {255, 255, 255, 255};
             SDL_Surface* textSurface = TTF_RenderText_Blended(font, buffer, strlen(buffer), textColor);
             if (textSurface) {
@@ -621,7 +659,7 @@ int main(int argc, char* argv[]) {
 
             float scaledHeaderHeight = HEADER_HEIGHT * camera.scale;
             float headerVertices[] = {
-                scaledX / WINDOW_WIDTH * 2 - 1, 1 - scaledY / WINDOW_HEIGHT * 2, 0.0f, 0.0f,
+                scaledX / WINDOW_WIDTH * 2 - 1, 1 - scaledY / WINDOW_HEIGHT * 2, 0.0f, 0.0f, // Fixed: WINDOW_HEIGHT
                 scaledX / WINDOW_WIDTH * 2 - 1, 1 - (scaledY + scaledHeaderHeight) / WINDOW_HEIGHT * 2, 0.0f, 0.0f,
                 (scaledX + scaledWidth) / WINDOW_WIDTH * 2 - 1, 1 - (scaledY + scaledHeaderHeight) / WINDOW_HEIGHT * 2, 0.0f, 0.0f,
                 (scaledX + scaledWidth) / WINDOW_WIDTH * 2 - 1, 1 - scaledY / WINDOW_HEIGHT * 2, 0.0f, 0.0f
@@ -726,7 +764,7 @@ int main(int argc, char* argv[]) {
                         (scaledInputX + scaledOutlineRadius) / WINDOW_WIDTH * 2 - 1, 1 - (scaledInputY - scaledOutlineRadius) / WINDOW_HEIGHT * 2, 1.0f, 0.0f
                     };
                     glBufferData(GL_ARRAY_BUFFER, sizeof(inputOutlineVertices), inputOutlineVertices, GL_STATIC_DRAW);
-                    glUniform3f(colorLoc, 1.0f, 1.0f, 0);
+                    glUniform3f(colorLoc, 1.0f, 1.0f, 1.0f);
                     glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
                 }
             }
@@ -735,7 +773,7 @@ int main(int argc, char* argv[]) {
         if (cameraTextTexture) {
             float textVertices[] = {
                 10.0f / WINDOW_WIDTH * 2 - 1, 1 - 10.0f / WINDOW_HEIGHT * 2, 0.0f, 0.0f,
-                10.0f / WINDOW_WIDTH * 2 - 1, 1 - (10.0f + cameraTextHeight) / WINDOW_HEIGHT * 2, 0.0f, 0.0f,
+                10.0f / WINDOW_WIDTH * 2 - 1, 1 - (10.0f + cameraTextHeight) / WINDOW_HEIGHT * 2, 0.0f, 1.0f,
                 (10.0f + cameraTextWidth) / WINDOW_WIDTH * 2 - 1, 1 - (10.0f + cameraTextHeight) / WINDOW_HEIGHT * 2, 1.0f, 1.0f,
                 (10.0f + cameraTextWidth) / WINDOW_WIDTH * 2 - 1, 1 - 10.0f / WINDOW_HEIGHT * 2, 1.0f, 0.0f
             };
@@ -753,7 +791,7 @@ int main(int argc, char* argv[]) {
     for (int i = 0; i < nodeCount; i++) {
         glDeleteTextures(1, &textTextures[i]);
     }
-    if (cameraTextTexture) glDeleteTextures(1, &cameraTextTexture); // Fixed: Correct cleanup
+    if (cameraTextTexture) glDeleteTextures(1, &cameraTextTexture);
     glDeleteVertexArrays(1, &VAO);
     glDeleteBuffers(1, &VBO);
     glDeleteBuffers(1, &EBO);
