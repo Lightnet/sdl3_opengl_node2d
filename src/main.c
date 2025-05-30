@@ -17,8 +17,8 @@ static TTF_Font *font = NULL;
 
 /* Node structure */
 typedef struct {
-    float x, y; // Top-left position
-    SDL_Vertex vertices[4]; // Square mesh vertices
+    float x, y; // Top-left position in world coordinates
+    SDL_Vertex vertices[4]; // Square mesh vertices in world coordinates
     char name[32]; // Node name
     char inputs[MAX_PORTS][16]; // Input port names
     char outputs[MAX_PORTS][16]; // Output port names
@@ -48,6 +48,10 @@ static bool is_connecting = false;
 static int start_node_idx = -1;
 static int start_port_idx = -1;
 static float connect_start_x, connect_start_y; // Start of active connection line
+static float view_x = 0.0f, view_y = 0.0f; // View offset for panning
+static float zoom = 1.0f; // Zoom scale
+static bool is_panning = false;
+static float pan_start_x, pan_start_y;
 
 /* Initialize a node */
 void init_node(Node *node, float x, float y, const char *name, int num_inputs, int num_outputs) {
@@ -61,7 +65,7 @@ void init_node(Node *node, float x, float y, const char *name, int num_inputs, i
     node->drag_offset_x = 0.0f;
     node->drag_offset_y = 0.0f;
 
-    // Initialize vertices (100x100 square)
+    // Initialize vertices (100x100 square in world coordinates)
     SDL_Color blue = {0, 0, 255, 255};
     float r = blue.r / 255.0f;
     float g = blue.g / 255.0f;
@@ -73,35 +77,35 @@ void init_node(Node *node, float x, float y, const char *name, int num_inputs, i
     node->vertices[3] = (SDL_Vertex){{x, y + 100.0f}, {r, g, b, a}, {0.0f, 1.0f}}; // Bottom-left
 }
 
-/* Check if a point is inside a node */
+/* Check if a point is inside a node (adjusted for view and zoom) */
 bool is_point_in_node(const Node *node, float mx, float my) {
-    float x_min = node->vertices[0].position.x;
-    float x_max = node->vertices[2].position.x;
-    float y_min = node->vertices[0].position.y;
-    float y_max = node->vertices[2].position.y;
+    float x_min = (node->vertices[0].position.x + view_x) * zoom;
+    float x_max = (node->vertices[2].position.x + view_x) * zoom;
+    float y_min = (node->vertices[0].position.y + view_y) * zoom;
+    float y_max = (node->vertices[2].position.y + view_y) * zoom;
     return mx >= x_min && mx <= x_max && my >= y_min && my <= y_max;
 }
 
 /* Check if a point is inside an output port square */
 bool is_point_in_output_port(const Node *node, int port_idx, float mx, float my) {
-    float x = node->x + 110.0f;
-    float y = node->y + 30.0f + port_idx * 20.0f;
-    return mx >= x && mx <= x + 10.0f && my >= y && my <= y + 10.0f;
+    float x = (node->x + 110.0f + view_x) * zoom;
+    float y = (node->y + 30.0f + port_idx * 20.0f + view_y) * zoom;
+    return mx >= x && mx <= x + 10.0f * zoom && my >= y && my <= y + 10.0f * zoom;
 }
 
 /* Check if a point is inside an input port square */
 bool is_point_in_input_port(const Node *node, int port_idx, float mx, float my) {
-    float x = node->x - 20.0f;
-    float y = node->y + 30.0f + port_idx * 20.0f;
-    return mx >= x && mx <= x + 10.0f && my >= y && my <= y + 10.0f;
+    float x = (node->x - 20.0f + view_x) * zoom;
+    float y = (node->y + 30.0f + port_idx * 20.0f + view_y) * zoom;
+    return mx >= x && mx <= x + 10.0f * zoom && my >= y && my <= y + 10.0f * zoom;
 }
 
 /* Update node position during drag */
 void update_node_position(Node *node, float mx, float my) {
-    // Update position using stored offset
-    node->x = mx - node->drag_offset_x;
-    node->y = my - node->drag_offset_y;
-    // Update vertices directly
+    // Adjust mouse position for view and zoom
+    node->x = (mx / zoom - view_x) - node->drag_offset_x;
+    node->y = (my / zoom - view_y) - node->drag_offset_y;
+    // Update vertices
     node->vertices[0].position.x = node->x;
     node->vertices[0].position.y = node->y;
     node->vertices[1].position.x = node->x + 100.0f;
@@ -121,6 +125,7 @@ void create_node_textures(Node *node) {
         SDL_DestroySurface(surface);
     }
     for (int i = 0; i < node->num_inputs; i++) {
+        snprintf(node->inputs[i], 16, "In%d", i + 1);
         surface = TTF_RenderText_Solid(font, node->inputs[i], strlen(node->inputs[i]), white);
         if (surface) {
             node->input_textures[i] = SDL_CreateTextureFromSurface(renderer, surface);
@@ -128,6 +133,7 @@ void create_node_textures(Node *node) {
         }
     }
     for (int i = 0; i < node->num_outputs; i++) {
+        snprintf(node->outputs[i], 16, "Out%d", i + 1);
         surface = TTF_RenderText_Solid(font, node->outputs[i], strlen(node->outputs[i]), white);
         if (surface) {
             node->output_textures[i] = SDL_CreateTextureFromSurface(renderer, surface);
@@ -147,9 +153,9 @@ void destroy_node(Node *node) {
     }
 }
 
-/* Draw debug rectangle for node hitbox */
+/* Draw debug rectangle for node */
 void draw_debug_rect(const Node *node) {
-    SDL_FRect rect = {node->x, node->y, 100.0f, 100.0f};
+    SDL_FRect rect = {(node->x + view_x) * zoom, (node->y + view_y) * zoom, 100.0f * zoom, 100.0f * zoom};
     SDL_SetRenderDrawColor(renderer, 255, 0, 0, 255); // Red outline
     SDL_RenderRect(renderer, &rect);
 }
@@ -158,13 +164,23 @@ void draw_debug_rect(const Node *node) {
 void draw_port_squares(const Node *node) {
     // Input ports (green squares)
     for (int j = 0; j < node->num_inputs; j++) {
-        SDL_FRect input_rect = {node->x - 20.0f, node->y + 30.0f + j * 20.0f, 10.0f, 10.0f};
+        SDL_FRect input_rect = {
+            (node->x - 20.0f + view_x) * zoom,
+            (node->y + 30.0f + j * 20.0f + view_y) * zoom,
+            10.0f * zoom,
+            10.0f * zoom
+        };
         SDL_SetRenderDrawColor(renderer, 0, 255, 0, 255); // Green
         SDL_RenderFillRect(renderer, &input_rect);
     }
     // Output ports (red squares)
     for (int j = 0; j < node->num_outputs; j++) {
-        SDL_FRect output_rect = {node->x + 110.0f, node->y + 30.0f + j * 20.0f, 10.0f, 10.0f};
+        SDL_FRect output_rect = {
+            (node->x + 110.0f + view_x) * zoom,
+            (node->y + 30.0f + j * 20.0f + view_y) * zoom,
+            10.0f * zoom,
+            10.0f * zoom
+        };
         SDL_SetRenderDrawColor(renderer, 255, 0, 0, 255); // Red
         SDL_RenderFillRect(renderer, &output_rect);
     }
@@ -177,23 +193,16 @@ void draw_connections(void) {
         Connection *conn = &connections[i];
         Node *output_node = &nodes[conn->output_node_idx];
         Node *input_node = &nodes[conn->input_node_idx];
-        float x1 = output_node->x + 115.0f; // Center of output port
-        float y1 = output_node->y + 35.0f + conn->output_port_idx * 20.0f;
-        float x2 = input_node->x - 15.0f; // Center of input port
-        float y2 = input_node->y + 35.0f + conn->input_port_idx * 20.0f;
+        float x1 = (output_node->x + 115.0f + view_x) * zoom; // Center of output port
+        float y1 = (output_node->y + 35.0f + conn->output_port_idx * 20.0f + view_y) * zoom;
+        float x2 = (input_node->x - 15.0f + view_x) * zoom; // Center of input port
+        float y2 = (input_node->y + 35.0f + conn->input_port_idx * 20.0f + view_y) * zoom;
         SDL_RenderLine(renderer, x1, y1, x2, y2);
-    }
-    // Draw active connection line (yellow)
-    if (is_connecting) {
-        SDL_SetRenderDrawColor(renderer, 255, 255, 0, 255); // Yellow
-        SDL_RenderLine(renderer, connect_start_x, connect_start_y, 
-                       connect_start_x, connect_start_y); // Will update with mouse pos
     }
 }
 
 int main(int argc, char *argv[]) {
     printf("SDL3 freetype\n");
-    // Initialize SDL and SDL_ttf
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Couldn't initialize SDL: %s", SDL_GetError());
         return 1;
@@ -207,20 +216,18 @@ int main(int argc, char *argv[]) {
 
     printf("SDL_CreateWindowAndRenderer\n");
     if (!SDL_CreateWindowAndRenderer("Node Editor Test", 800, 600, SDL_WINDOW_RESIZABLE, &window, &renderer)) {
-        SDL_Log("Window/Renderer creation failed: %s", SDL_GetError());
+        printf("Window/Renderer failed: %s\n", SDL_GetError());
         TTF_Quit();
         SDL_Quit();
         return 1;
     }
 
-    // Set blend mode for proper rendering
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
 
-    // Load font
     printf("TTF_OpenFont\n");
     font = TTF_OpenFont("Kenney Mini.ttf", 16);
     if (!font) {
-        SDL_Log("Font loading failed: %s", SDL_GetError());
+        printf("Font load failed: %s\n", SDL_GetError());
         SDL_DestroyRenderer(renderer);
         SDL_DestroyWindow(window);
         TTF_Quit();
@@ -230,7 +237,7 @@ int main(int argc, char *argv[]) {
 
     // Initialize test nodes
     num_nodes = 2;
-    init_node(&nodes[0], 100.0f, 100.0f, "Node 1", 2, 1); // 2 inputs, 1 output
+    init_node(&nodes[0], 280.0f, 200.0f, "Node 1", 2, 1); // 2 inputs, 1 output
     init_node(&nodes[1], 300.0f, 100.0f, "Node 2", 1, 2); // 1 input, 2 outputs
     for (int i = 0; i < num_nodes; i++) {
         create_node_textures(&nodes[i]);
@@ -238,102 +245,145 @@ int main(int argc, char *argv[]) {
 
     // Main loop
     bool running = true;
-    Node *dragged_node = NULL; // Track the currently dragged node
-    float mouse_x = 0.0f, mouse_y = 0.0f; // Track mouse for active connection
+    Node *dragged_node = NULL;
+    float mouse_x = 0.0f, mouse_y = 0.0f;
     while (running) {
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
             switch (event.type) {
-                case SDL_EVENT_QUIT:
-                    running = false;
-                    break;
-                case SDL_EVENT_MOUSE_BUTTON_DOWN:
-                    if (event.button.button == SDL_BUTTON_LEFT) {
-                        float mx = (float)event.button.x;
-                        float my = (float)event.button.y;
-                        // Check for output port click to start connection
-                        if (!is_connecting) {
-                            for (int i = 0; i < num_nodes; i++) {
-                                for (int j = 0; j < nodes[i].num_outputs; j++) {
-                                    if (is_point_in_output_port(&nodes[i], j, mx, my)) {
-                                        is_connecting = true;
-                                        start_node_idx = i;
-                                        start_port_idx = j;
-                                        connect_start_x = nodes[i].x + 115.0f;
-                                        connect_start_y = nodes[i].y + 35.0f + j * 20.0f;
-                                        printf("Start connection from Node %d, Output %d\n", i, j);
-                                        break;
-                                    }
-                                }
-                                if (is_connecting) break;
-                            }
-                        }
-                        // Check for input port click to complete connection
-                        if (is_connecting) {
-                            for (int i = 0; i < num_nodes; i++) {
-                                for (int j = 0; j < nodes[i].num_inputs; j++) {
-                                    if (is_point_in_input_port(&nodes[i], j, mx, my)) {
-                                        if (num_connections < MAX_CONNECTIONS) {
-                                            connections[num_connections++] = (Connection){
-                                                start_node_idx, start_port_idx, i, j
-                                            };
-                                            printf("Connected Node %d, Output %d to Node %d, Input %d\n", 
-                                                   start_node_idx, start_port_idx, i, j);
-                                        }
-                                        is_connecting = false;
-                                        start_node_idx = -1;
-                                        start_port_idx = -1;
-                                        break;
-                                    }
-                                }
-                                if (!is_connecting) break;
-                            }
-                        }
-                        // Check for node dragging if not connecting
-                        if (!is_connecting && !dragged_node) {
-                            for (int i = num_nodes - 1; i >= 0; i--) {
-                                if (is_point_in_node(&nodes[i], mx, my)) {
-                                    dragged_node = &nodes[i];
-                                    dragged_node->is_dragging = true;
-                                    dragged_node->drag_offset_x = mx - nodes[i].x;
-                                    dragged_node->drag_offset_y = my - nodes[i].y;
-                                    printf("Start dragging %s at (%f, %f), offset (%f, %f)\n", 
-                                           nodes[i].name, mx, my, 
-                                           dragged_node->drag_offset_x, dragged_node->drag_offset_y);
+            case SDL_EVENT_QUIT:
+                running = false;
+                break;
+            case SDL_EVENT_MOUSE_BUTTON_DOWN:
+                if (event.button.button == SDL_BUTTON_LEFT) {
+                    float mx = (float)event.button.x;
+                    float my = (float)event.button.y;
+                    if (!is_connecting) {
+                        for (int i = 0; i < num_nodes; i++) {
+                            for (int j = 0; j < nodes[i].num_outputs; j++) {
+                                if (is_point_in_output_port(&nodes[i], j, mx, my)) {
+                                    is_connecting = true;
+                                    start_node_idx = i;
+                                    start_port_idx = j;
+                                    connect_start_x = (nodes[i].x + 115.0f + view_x) * zoom;
+                                    connect_start_y = (nodes[i].y + 35.0f + j * 20.0f + view_y) * zoom;
+                                    printf("Start connection from Node %d, Output %d\n", i, j);
                                     break;
                                 }
                             }
-                        }
-                    } else if (event.button.button == SDL_BUTTON_RIGHT) {
-                        // Disconnect all lines on right-click
-                        num_connections = 0;
-                        printf("Disconnected all lines\n");
-                    }
-                    break;
-                case SDL_EVENT_MOUSE_BUTTON_UP:
-                    if (event.button.button == SDL_BUTTON_LEFT) {
-                        if (dragged_node) {
-                            printf("Stop dragging %s\n", dragged_node->name);
-                            dragged_node->is_dragging = false;
-                            dragged_node = NULL;
+                            if (is_connecting) break;
                         }
                     }
-                    break;
-                case SDL_EVENT_MOUSE_MOTION:
-                    mouse_x = (float)event.motion.x;
-                    mouse_y = (float)event.motion.y;
+                    if (is_connecting) {
+                        for (int i = 0; i < num_nodes; i++) {
+                            for (int j = 0; j < nodes[i].num_inputs; j++) {
+                                if (is_point_in_input_port(&nodes[i], j, mx, my)) {
+                                    if (num_connections < MAX_CONNECTIONS) {
+                                        connections[num_connections++] = (Connection){
+                                            start_node_idx, start_port_idx, i, j
+                                        };
+                                        printf("Connected Node %d, Output %d to Node %d, Input %d\n",
+                                            start_node_idx, start_port_idx, i, j);
+                                    }
+                                    is_connecting = false;
+                                    start_node_idx = -1;
+                                    start_port_idx = -1;
+                                    break;
+                                }
+                            }
+                            if (!is_connecting) break;
+                        }
+                    }
+                    if (!is_connecting && !dragged_node) {
+                        for (int i = num_nodes - 1; i >= 0; i--) {
+                            if (is_point_in_node(&nodes[i], mx, my)) {
+                                dragged_node = &nodes[i];
+                                dragged_node->is_dragging = true;
+                                dragged_node->drag_offset_x = (mx / zoom - view_x) - nodes[i].x;
+                                dragged_node->drag_offset_y = (my / zoom - view_y) - nodes[i].y;
+                                printf("Dragging %s at (%f, %f), offset (%f, %f)\n",
+                                        nodes[i].name, mx, my,
+                                        dragged_node->drag_offset_x, dragged_node->drag_offset_y);
+                                break;
+                            }
+                        }
+                    }
+                } else if (event.button.button == SDL_BUTTON_RIGHT) {
+                    float mx = (float)event.button.x;
+                    float my = (float)event.button.y;
+                    bool near_input = false;
+                    for (int i = 0; i < num_nodes; i++) {
+                        for (int j = 0; j < nodes[i].num_inputs; j++) {
+                            if (is_point_in_input_port(&nodes[i], j, mx, my)) {
+                                near_input = true;
+                                for (int k = 0; k < num_connections; k++) {
+                                    if (connections[k].input_node_idx == i &&
+                                        connections[k].input_port_idx == j) {
+                                        connections[k] = connections[--num_connections];
+                                        printf("Disconnected input %d from Node %d\n", j, i);
+                                        break;
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                        if (near_input) break;
+                    }
+                    if (!near_input && num_nodes < MAX_NODES) {
+                        char name[32];
+                        snprintf(name, sizeof(name), "Node %d", num_nodes + 1);
+                        init_node(&nodes[num_nodes], mx / zoom - view_x, my / zoom - view_y, name, 1, 1);
+                        create_node_textures(&nodes[num_nodes]);
+                        printf("Added %s at (%f, %f)\n", name, mx / zoom - view_x, my / zoom - view_y);
+                        num_nodes++;
+                    }
+                } else if (event.button.button == SDL_BUTTON_MIDDLE) {
+                    is_panning = true;
+                    pan_start_x = (float)event.button.x;
+                    pan_start_y = (float)event.button.y;
+                }
+                break;
+            case SDL_EVENT_MOUSE_BUTTON_UP:
+                if (event.button.button == SDL_BUTTON_LEFT) {
                     if (dragged_node) {
-                        update_node_position(dragged_node, mouse_x, mouse_y);
-                        printf("Dragging %s to (%f, %f), new pos (%f, %f)\n", 
-                               dragged_node->name, mouse_x, mouse_y, 
-                               dragged_node->x, dragged_node->y);
+                        printf("Finished dragging %s\n", dragged_node->name);
+                        dragged_node->is_dragging = false;
+                        dragged_node = NULL;
                     }
-                    break;
+                } else if (event.button.button == SDL_BUTTON_MIDDLE) {
+                    is_panning = false;
+                }
+                break;
+            case SDL_EVENT_MOUSE_MOTION:
+                mouse_x = (float)event.motion.x;
+                mouse_y = (float)event.motion.y;
+                if (dragged_node) {
+                    update_node_position(dragged_node, mouse_x, mouse_y);
+                    printf("Dragging %s to (%f, %f), new pos (%f, %f)\n",
+                           dragged_node->name, mouse_x, mouse_y,
+                           dragged_node->x, dragged_node->y);
+                }
+                if (is_panning) {
+                    view_x += (mouse_x - pan_start_x) / zoom;
+                    view_y += (mouse_y - pan_start_y) / zoom;
+                    pan_start_x = mouse_x;
+                    pan_start_y = mouse_y;
+                }
+                break;
+            case SDL_EVENT_MOUSE_WHEEL:
+                if (event.wheel.y != 0) {
+                    float old_zoom = zoom;
+                    zoom += event.wheel.y * 0.1f;
+                    zoom = SDL_clamp(zoom, 0.5f, 2.0f); // Min 0.5, max 2.0
+                    view_x = mouse_x / zoom - (mouse_x / old_zoom - view_x);
+                    view_y = mouse_y / zoom - (mouse_y / old_zoom - view_y);
+                    printf("Zoom: %f\n", zoom);
+                }
+                break;
             }
         }
 
-        // Render
-        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255); // Black background
+        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
         SDL_RenderClear(renderer);
 
         // Draw connections
@@ -341,35 +391,55 @@ int main(int argc, char *argv[]) {
 
         // Draw active connection line
         if (is_connecting) {
-            SDL_SetRenderDrawColor(renderer, 255, 255, 0, 255); // Yellow
+            SDL_SetRenderDrawColor(renderer, 255, 255, 0, 255);
             SDL_RenderLine(renderer, connect_start_x, connect_start_y, mouse_x, mouse_y);
         }
 
         // Render nodes
         for (int i = 0; i < num_nodes; i++) {
-            // Draw node square
-            SDL_RenderGeometry(renderer, NULL, nodes[i].vertices, 4, indices, 6);
-            // Draw debug rectangle if dragging
+            // Transform vertices for rendering
+            SDL_Vertex transformed[4];
+            for (int j = 0; j < 4; j++) {
+                transformed[j] = nodes[i].vertices[j];
+                transformed[j].position.x = (transformed[j].position.x + view_x) * zoom;
+                transformed[j].position.y = (transformed[j].position.y + view_y) * zoom;
+            }
+            SDL_RenderGeometry(renderer, NULL, transformed, 4, indices, 6);
+
             if (nodes[i].is_dragging) {
                 draw_debug_rect(&nodes[i]);
             }
-            // Draw node name
-            SDL_FRect name_dest = {nodes[i].x + 10.0f, nodes[i].y + 10.0f, 0.0f, 0.0f};
+            SDL_FRect name_dest = {
+                (nodes[i].x + 10.0f + view_x) * zoom,
+                (nodes[i].y + 10.0f + view_y) * zoom,
+                0.0f, 0.0f
+            };
             SDL_GetTextureSize(nodes[i].name_texture, &name_dest.w, &name_dest.h);
+            name_dest.w *= zoom;
+            name_dest.h *= zoom;
             SDL_RenderTexture(renderer, nodes[i].name_texture, NULL, &name_dest);
-            // Draw input ports and squares
             for (int j = 0; j < nodes[i].num_inputs; j++) {
-                SDL_FRect input_dest = {nodes[i].x - 10.0f, nodes[i].y + 30.0f + j * 20.0f, 0.0f, 0.0f};
+                SDL_FRect input_dest = {
+                    (nodes[i].x - 10.0f + view_x) * zoom,
+                    (nodes[i].y + 30.0f + j * 20.0f + view_y) * zoom,
+                    0.0f, 0.0f
+                };
                 SDL_GetTextureSize(nodes[i].input_textures[j], &input_dest.w, &input_dest.h);
+                input_dest.w *= zoom;
+                input_dest.h *= zoom;
                 SDL_RenderTexture(renderer, nodes[i].input_textures[j], NULL, &input_dest);
             }
-            // Draw output ports and squares
             for (int j = 0; j < nodes[i].num_outputs; j++) {
-                SDL_FRect output_dest = {nodes[i].x + 90.0f, nodes[i].y + 30.0f + j * 20.0f, 0.0f, 0.0f};
+                SDL_FRect output_dest = {
+                    (nodes[i].x + 90.0f + view_x) * zoom,
+                    (nodes[i].y + 30.0f + j * 20.0f + view_y) * zoom,
+                    0.0f, 0.0f
+                };
                 SDL_GetTextureSize(nodes[i].output_textures[j], &output_dest.w, &output_dest.h);
+                output_dest.w *= zoom;
+                output_dest.h *= zoom;
                 SDL_RenderTexture(renderer, nodes[i].output_textures[j], NULL, &output_dest);
             }
-            // Draw port squares
             draw_port_squares(&nodes[i]);
         }
 
