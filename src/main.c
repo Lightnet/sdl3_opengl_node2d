@@ -1,526 +1,746 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
-#include <SDL3_ttf/SDL_ttf.h>
+#include <glad/gl.h>
+#include <ft2build.h>
+#include FT_FREETYPE_H // FreeType header
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdbool.h>
 #include <string.h>
-#include <math.h>
+
+typedef struct {
+    float x, y; // Center position in NDC
+    float width, height; // Size of the main square
+    float input_x, input_y; // Center of input rectangle
+    float output_x, output_y; // Center of output rectangle
+    float io_width, io_height; // Size of input/output rectangles
+    GLuint vao, vbo; // For the main square
+    GLuint input_vao, input_vbo; // For input rectangle
+    GLuint output_vao, output_vbo; // For output rectangle
+    int connected_to; // Index of Node2D this node's input is connected to (-1 if none)
+    bool is_input_connected; // True if input is connected
+    bool is_output_connected; // True if output is connected
+} Node2D;
 
 #define MAX_NODES 10
-#define MAX_PORTS 20 // Cap on inputs and outputs per node
-#define MAX_CONNECTIONS 50 // Max connections to prevent overflow
-#define GRID_SIZE 20.0f // NEW: Grid size for snapping
+static Node2D nodes[MAX_NODES]; // Array of Node2D instances
+static Node2D node; // Single Node2D 
 
-/* We will use this renderer to draw into this window every frame. */
+static int node_count = 2; // Start with 2 nodes for demonstration
+
+static float square_pos_x = 0.0f; // Square's center X in NDC
+static float square_pos_y = 0.0f; // Square's center Y in NDC
+static bool is_dragging = false; // Track if mouse is dragging
+
+static int dragging_node = -1; // Index of node being dragged
+
+static float drag_offset_x = 0.0f; // Offset from square center to mouse click
+static float drag_offset_y = 0.0f; // Offset from square center to mouse click
+
+static bool is_connecting = false; // Track if connecting
+static int connecting_node = -1; // Index of node whose input is being connected
+static bool is_connecting_from_output = false; // Track if connecting from output (red)
+static float connecting_x, connecting_y; // Current mouse position for drawing line
+static GLuint line_vao, line_vbo; // For rendering connection lines
+
+
+// Structure to store character glyph data
+typedef struct {
+    GLuint texture_id; // Texture ID for the glyph
+    int width, height; // Glyph dimensions
+    int bearing_x, bearing_y; // Offset from baseline to left/top
+    unsigned int advance; // Advance to next glyph
+} Character;
+
 static SDL_Window *window = NULL;
-static SDL_Renderer *renderer = NULL;
-static TTF_Font *font = NULL;
+static SDL_GLContext gl_context = NULL;
+static GLuint shader_program, vao, vbo;
+static GLuint text_shader_program, text_vao, text_vbo; // For text rendering
+static FT_Library ft;
+static FT_Face face;
+static Character characters[128]; // Store ASCII characters
 
-/* Node structure */
-typedef struct {
-    float x, y; // Top-left position in world coordinates
-    SDL_Vertex vertices[4]; // Square mesh vertices in world coordinates
-    char name[32]; // Node name
-    char inputs[MAX_PORTS][16]; // Input port names
-    char outputs[MAX_PORTS][16]; // Output port names
-    int num_inputs, num_outputs; // Number of ports
-    SDL_Texture *name_texture; // Texture for node name
-    SDL_Texture *input_textures[MAX_PORTS]; // Textures for input labels
-    SDL_Texture *output_textures[MAX_PORTS]; // Textures for output labels
-    bool is_dragging;
-    float drag_offset_x, drag_offset_y;
-} Node;
 
-/* Connection structure */
-typedef struct {
-    int output_node_idx; // Index of node with output port
-    int output_port_idx; // Index of output port
-    int input_node_idx;  // Index of node with input port
-    int input_port_idx;  // Index of input port
-} Connection;
+// Vertex shader for lines
+const char *line_vertex_shader_src =
+    "#version 330 core\n"
+    "layout(location = 0) in vec3 aPos;\n"
+    "void main() {\n"
+    "    gl_Position = vec4(aPos, 1.0);\n"
+    "}\n";
 
-/* Global state */
-static Node nodes[MAX_NODES];
-static int num_nodes = 0;
-static Uint32 indices[6] = {0, 1, 2, 0, 2, 3};
-static Connection connections[MAX_CONNECTIONS];
-static int num_connections = 0;
-static bool is_connecting = false;
-static int start_node_idx = -1;
-static int start_port_idx = -1;
-static float connect_start_x, connect_start_y; // Start of active connection line
-static float view_x = 0.0f, view_y = 0.0f; // View offset for panning
-static float zoom = 1.0f; // Zoom scale
-static bool is_panning = false;
-static float pan_start_x, pan_start_y;
+// Fragment shader for lines
+const char *line_fragment_shader_src =
+    "#version 330 core\n"
+    "out vec4 FragColor;\n"
+    "void main() {\n"
+    "    FragColor = vec4(1.0, 1.0, 1.0, 1.0); // White line\n"
+    "}\n";
 
-/* Initialize a node */
-void init_node(Node *node, float x, float y, const char *name, int num_inputs, int num_outputs) {
-    // NEW: Snap position to grid
-    node->x = roundf(x / GRID_SIZE) * GRID_SIZE;
-    node->y = roundf(y / GRID_SIZE) * GRID_SIZE;
-    strncpy(node->name, name, sizeof(node->name) - 1);
-    node->name[sizeof(node->name) - 1] = '\0';
-    node->num_inputs = SDL_min(num_inputs, MAX_PORTS);
-    node->num_outputs = SDL_min(num_outputs, MAX_PORTS);
-    node->is_dragging = false;
-    node->drag_offset_x = 0.0f;
-    node->drag_offset_y = 0.0f;
+static GLuint line_shader_program;
 
-    // Initialize vertices (100x100 square in world coordinates)
-    SDL_Color blue = {0, 0, 255, 255};
-    float r = blue.r / 255.0f;
-    float g = blue.g / 255.0f;
-    float b = blue.b / 255.0f;
-    float a = blue.a / 255.0f;
-    node->vertices[0] = (SDL_Vertex){{node->x, node->y}, {r, g, b, a}, {0.0f, 0.0f}};           // Top-left
-    node->vertices[1] = (SDL_Vertex){{node->x + 100.0f, node->y}, {r, g, b, a}, {1.0f, 0.0f}}; // Top-right
-    node->vertices[2] = (SDL_Vertex){{node->x + 100.0f, node->y + 100.0f}, {r, g, b, a}, {1.0f, 1.0f}}; // Bottom-right
-    node->vertices[3] = (SDL_Vertex){{node->x, node->y + 100.0f}, {r, g, b, a}, {0.0f, 1.0f}}; // Bottom-left
+// Vertex shader for the square
+const char *vertex_shader_src =
+    "#version 330 core\n"
+    "layout(location = 0) in vec3 aPos;\n"
+    "void main() {\n"
+    "    gl_Position = vec4(aPos, 1.0);\n"
+    "}\n";
+
+// Fragment shader for the square
+const char *fragment_shader_src =
+    "#version 330 core\n"
+    "out vec4 FragColor;\n"
+    "uniform vec3 color;\n"
+    "void main() {\n"
+    "    FragColor = vec4(color, 1.0);\n"
+    "}\n";
+
+// Vertex shader for text (includes texture coordinates)
+const char *text_vertex_shader_src =
+    "#version 330 core\n"
+    "layout(location = 0) in vec4 aPosTex; // <vec2 pos, vec2 tex>\n"
+    "out vec2 TexCoord;\n"
+    "uniform mat4 projection;\n"
+    "void main() {\n"
+    "    gl_Position = projection * vec4(aPosTex.xy, 0.0, 1.0);\n"
+    "    TexCoord = aPosTex.zw;\n"
+    "}\n";
+
+// Fragment shader for text
+const char *text_fragment_shader_src =
+    "#version 330 core\n"
+    "in vec2 TexCoord;\n"
+    "out vec4 FragColor;\n"
+    "uniform sampler2D textTexture;\n"
+    "uniform vec3 textColor;\n"
+    "void main() {\n"
+    "    vec4 sampled = vec4(1.0, 1.0, 1.0, texture(textTexture, TexCoord).r);\n"
+    "    FragColor = vec4(textColor, 1.0) * sampled;\n"
+    "}\n";
+
+GLuint compile_shader(GLenum type, const char *source) {
+    GLuint shader = glCreateShader(type);
+    glShaderSource(shader, 1, &source, NULL);
+    glCompileShader(shader);
+    GLint success;
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
+    if (!success) {
+        char info_log[512];
+        glGetShaderInfoLog(shader, 512, NULL, info_log);
+        printf("Shader compilation failed: %s\n", info_log);
+        glDeleteShader(shader);
+        return 0;
+    }
+    return shader;
 }
 
-/* Check if a point is inside a node (adjusted for view and zoom) */
-bool is_point_in_node(const Node *node, float mx, float my) {
-    float x_min = (node->vertices[0].position.x + view_x) * zoom;
-    float x_max = (node->vertices[2].position.x + view_x) * zoom;
-    float y_min = (node->vertices[0].position.y + view_y) * zoom;
-    float y_max = (node->vertices[2].position.y + view_y) * zoom;
-    return mx >= x_min && mx <= x_max && my >= y_min && my <= y_max;
-}
+void init_freetype(void) {
+    // Initialize FreeType
+    if (FT_Init_FreeType(&ft)) {
+        printf("Failed to initialize FreeType\n");
+        exit(1);
+    }
 
-/* Check if a point is inside an output port square */
-bool is_point_in_output_port(const Node *node, int port_idx, float mx, float my) {
-    float x = (node->x + 110.0f + view_x) * zoom;
-    float y = (node->y + 30.0f + port_idx * 20.0f + view_y) * zoom;
-    return mx >= x && mx <= x + 10.0f * zoom && my >= y && my <= y + 10.0f * zoom;
-}
+    // Load font (ensure arial.ttf is in your project directory)
+    if (FT_New_Face(ft, "Kenney Mini.ttf", 0, &face)) {
+        printf("Failed to load font\n");
+        exit(1);
+    }
 
-/* Check if a point is inside an input port square */
-bool is_point_in_input_port(const Node *node, int port_idx, float mx, float my) {
-    float x = (node->x - 20.0f + view_x) * zoom;
-    float y = (node->y + 30.0f + port_idx * 20.0f + view_y) * zoom;
-    return mx >= x && mx <= x + 10.0f * zoom && my >= y && my <= y + 10.0f * zoom;
-}
+    // Set pixel size for the font
+    FT_Set_Pixel_Sizes(face, 0, 48);
 
-/* NEW: Check if a connection to an input port already exists */
-bool has_existing_connection_to_input(int input_node_idx, int input_port_idx) {
-    for (int i = 0; i < num_connections; i++) {
-        if (connections[i].input_node_idx == input_node_idx &&
-            connections[i].input_port_idx == input_port_idx) {
-            return true;
+    // Disable byte-alignment restriction
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+
+    // Load first 128 ASCII characters
+    for (unsigned char c = 0; c < 128; c++) {
+        if (FT_Load_Char(face, c, FT_LOAD_RENDER)) {
+            printf("Failed to load glyph '%c'\n", c);
+            continue;
         }
-    }
-    return false;
-}
 
-/* Update node position during drag */
-void update_node_position(Node *node, float mx, float my) {
-    // Adjust mouse position for view and zoom
-    node->x = (mx / zoom - view_x) - node->drag_offset_x;
-    node->y = (my / zoom - view_y) - node->drag_offset_y;
-    // NEW: Snap to grid
-    node->x = roundf(node->x / GRID_SIZE) * GRID_SIZE;
-    node->y = roundf(node->y / GRID_SIZE) * GRID_SIZE;
-    // Update vertices
-    node->vertices[0].position.x = node->x;
-    node->vertices[0].position.y = node->y;
-    node->vertices[1].position.x = node->x + 100.0f;
-    node->vertices[1].position.y = node->y;
-    node->vertices[2].position.x = node->x + 100.0f;
-    node->vertices[2].position.y = node->y + 100.0f;
-    node->vertices[3].position.x = node->x;
-    node->vertices[3].position.y = node->y + 100.0f;
-}
+        // Generate texture
+        GLuint texture;
+        glGenTextures(1, &texture);
+        glBindTexture(GL_TEXTURE_2D, texture);
+        glTexImage2D(
+            GL_TEXTURE_2D,
+            0,
+            GL_RED,
+            face->glyph->bitmap.width,
+            face->glyph->bitmap.rows,
+            0,
+            GL_RED,
+            GL_UNSIGNED_BYTE,
+            face->glyph->bitmap.buffer
+        );
 
-/* Render text textures for a node */
-void create_node_textures(Node *node) {
-    SDL_Color white = {255, 255, 255, 255};
-    SDL_Surface *surface = TTF_RenderText_Solid(font, node->name, strlen(node->name), white);
-    if (surface) {
-        node->name_texture = SDL_CreateTextureFromSurface(renderer, surface);
-        SDL_DestroySurface(surface);
-    }
-    for (int i = 0; i < node->num_inputs; i++) {
-        snprintf(node->inputs[i], 16, "In%d", i + 1);
-        surface = TTF_RenderText_Solid(font, node->inputs[i], strlen(node->inputs[i]), white);
-        if (surface) {
-            node->input_textures[i] = SDL_CreateTextureFromSurface(renderer, surface);
-            SDL_DestroySurface(surface);
-        }
-    }
-    for (int i = 0; i < node->num_outputs; i++) {
-        snprintf(node->outputs[i], 16, "Out%d", i + 1);
-        surface = TTF_RenderText_Solid(font, node->outputs[i], strlen(node->outputs[i]), white);
-        if (surface) {
-            node->output_textures[i] = SDL_CreateTextureFromSurface(renderer, surface);
-            SDL_DestroySurface(surface);
-        }
-    }
-}
+        // Texture parameters
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
-/* Clean up node textures */
-void destroy_node(Node *node) {
-    if (node->name_texture) SDL_DestroyTexture(node->name_texture);
-    for (int i = 0; i < node->num_inputs; i++) {
-        if (node->input_textures[i]) SDL_DestroyTexture(node->input_textures[i]);
-    }
-    for (int i = 0; i < node->num_outputs; i++) {
-        if (node->output_textures[i]) SDL_DestroyTexture(node->output_textures[i]);
-    }
-}
-
-/* NEW: Delete a node and its connections */
-void delete_node(int node_idx) {
-    if (node_idx < 0 || node_idx >= num_nodes) return;
-    // Remove associated connections
-    int i = 0;
-    while (i < num_connections) {
-        if (connections[i].input_node_idx == node_idx || connections[i].output_node_idx == node_idx) {
-            connections[i] = connections[--num_connections];
-        } else {
-            // Adjust connection indices if nodes after node_idx shift
-            if (connections[i].input_node_idx > node_idx) connections[i].input_node_idx--;
-            if (connections[i].output_node_idx > node_idx) connections[i].output_node_idx--;
-            i++;
-        }
-    }
-    // Clean up node resources
-    destroy_node(&nodes[node_idx]);
-    // Shift remaining nodes
-    for (int j = node_idx; j < num_nodes - 1; j++) {
-        nodes[j] = nodes[j + 1];
-    }
-    num_nodes--;
-    printf("Deleted Node %d\n", node_idx + 1);
-}
-
-/* Draw debug rectangle for node */
-void draw_debug_rect(const Node *node) {
-    SDL_FRect rect = {(node->x + view_x) * zoom, (node->y + view_y) * zoom, 100.0f * zoom, 100.0f * zoom};
-    SDL_SetRenderDrawColor(renderer, 255, 0, 0, 255); // Red outline
-    SDL_RenderRect(renderer, &rect);
-}
-
-/* Draw colored squares for input/output ports */
-void draw_port_squares(const Node *node) {
-    // Input ports (green squares)
-    for (int j = 0; j < node->num_inputs; j++) {
-        SDL_FRect input_rect = {
-            (node->x - 20.0f + view_x) * zoom,
-            (node->y + 30.0f + j * 20.0f + view_y) * zoom,
-            10.0f * zoom,
-            10.0f * zoom
+        // Store character data
+        characters[c] = (Character){
+            .texture_id = texture,
+            .width = face->glyph->bitmap.width,
+            .height = face->glyph->bitmap.rows,
+            .bearing_x = face->glyph->bitmap_left,
+            .bearing_y = face->glyph->bitmap_top,
+            .advance = face->glyph->advance.x
         };
-        SDL_SetRenderDrawColor(renderer, 0, 255, 0, 255); // Green
-        SDL_RenderFillRect(renderer, &input_rect);
     }
-    // Output ports (red squares)
-    for (int j = 0; j < node->num_outputs; j++) {
-        SDL_FRect output_rect = {
-            (node->x + 110.0f + view_x) * zoom,
-            (node->y + 30.0f + j * 20.0f + view_y) * zoom,
-            10.0f * zoom,
-            10.0f * zoom
-        };
-        SDL_SetRenderDrawColor(renderer, 255, 0, 0, 255); // Red
-        SDL_RenderFillRect(renderer, &output_rect);
-    }
+
+    glBindTexture(GL_TEXTURE_2D, 0);
 }
 
-/* Draw connections */
-void draw_connections(void) {
-    SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255); // White lines
-    for (int i = 0; i < num_connections; i++) {
-        Connection *conn = &connections[i];
-        Node *output_node = &nodes[conn->output_node_idx];
-        Node *input_node = &nodes[conn->input_node_idx];
-        float x1 = (output_node->x + 115.0f + view_x) * zoom; // Center of output port
-        float y1 = (output_node->y + 35.0f + conn->output_port_idx * 20.0f + view_y) * zoom;
-        float x2 = (input_node->x - 15.0f + view_x) * zoom; // Center of input port
-        float y2 = (input_node->y + 35.0f + conn->input_port_idx * 20.0f + view_y) * zoom;
-        SDL_RenderLine(renderer, x1, y1, x2, y2);
+void init_text_opengl(void) {
+    // Compile text shaders
+    GLuint vertex_shader = compile_shader(GL_VERTEX_SHADER, text_vertex_shader_src);
+    GLuint fragment_shader = compile_shader(GL_FRAGMENT_SHADER, text_fragment_shader_src);
+    if (!vertex_shader || !fragment_shader) {
+        exit(1);
     }
+
+    // Link text shader program
+    text_shader_program = glCreateProgram();
+    glAttachShader(text_shader_program, vertex_shader);
+    glAttachShader(text_shader_program, fragment_shader);
+    glLinkProgram(text_shader_program);
+    GLint success;
+    glGetProgramiv(text_shader_program, GL_LINK_STATUS, &success);
+    if (!success) {
+        char info_log[512];
+        glGetProgramInfoLog(text_shader_program, 512, NULL, info_log);
+        printf("Text shader program linking failed: %s\n", info_log);
+        exit(1);
+    }
+    glDeleteShader(vertex_shader);
+    glDeleteShader(fragment_shader);
+
+    // Set up text VAO and VBO
+    glGenVertexArrays(1, &text_vao);
+    glGenBuffers(1, &text_vbo);
+    glBindVertexArray(text_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, text_vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(float) * 6 * 4, NULL, GL_DYNAMIC_DRAW);
+    glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+    glBindVertexArray(0);
 }
+
+
+
+void init_opengl(void) {
+    if (!gladLoaderLoadGL()) {
+        printf("Failed to initialize GLAD\n");
+        exit(1);
+    }
+
+    int win_w, win_h;
+    SDL_GetWindowSize(window, &win_w, &win_h);
+    glViewport(0, 0, win_w, win_h);
+
+    // Compile shaders for nodes
+    GLuint vertex_shader = compile_shader(GL_VERTEX_SHADER, vertex_shader_src);
+    GLuint fragment_shader = compile_shader(GL_FRAGMENT_SHADER, fragment_shader_src);
+    if (!vertex_shader || !fragment_shader) {
+        exit(1);
+    }
+    shader_program = glCreateProgram();
+    glAttachShader(shader_program, vertex_shader);
+    glAttachShader(shader_program, fragment_shader);
+    glLinkProgram(shader_program);
+    GLint success;
+    glGetProgramiv(shader_program, GL_LINK_STATUS, &success);
+    if (!success) {
+        char info_log[512];
+        glGetProgramInfoLog(shader_program, 512, NULL, info_log);
+        printf("Shader program linking failed: %s\n", info_log);
+        exit(1);
+    }
+    glDeleteShader(vertex_shader);
+    glDeleteShader(fragment_shader);
+
+    // Compile shaders for lines
+    vertex_shader = compile_shader(GL_VERTEX_SHADER, line_vertex_shader_src);
+    fragment_shader = compile_shader(GL_FRAGMENT_SHADER, line_fragment_shader_src);
+    if (!vertex_shader || !fragment_shader) {
+        exit(1);
+    }
+    line_shader_program = glCreateProgram();
+    glAttachShader(line_shader_program, vertex_shader);
+    glAttachShader(line_shader_program, fragment_shader);
+    glLinkProgram(line_shader_program);
+    glGetProgramiv(line_shader_program, GL_LINK_STATUS, &success);
+    if (!success) {
+        char info_log[512];
+        glGetProgramInfoLog(line_shader_program, 512, NULL, info_log);
+        printf("Line shader program linking failed: %s\n", info_log);
+        exit(1);
+    }
+    glDeleteShader(vertex_shader);
+    glDeleteShader(fragment_shader);
+
+    // Initialize two nodes
+    for (int i = 0; i < node_count; i++) {
+        nodes[i].x = -0.5f + i * 1.0f; // Space nodes apart
+        nodes[i].y = 0.0f;
+        nodes[i].width = 0.5f;
+        nodes[i].height = 0.5f;
+        nodes[i].io_width = 0.1f;
+        nodes[i].io_height = 0.1f;
+        nodes[i].input_x = nodes[i].x - nodes[i].width / 2.0f - nodes[i].io_width / 2.0f;
+        nodes[i].input_y = nodes[i].y;
+        nodes[i].output_x = nodes[i].x + nodes[i].width / 2.0f + nodes[i].io_width / 2.0f;
+        nodes[i].output_y = nodes[i].y;
+        nodes[i].connected_to = -1; // No initial connection
+        nodes[i].is_input_connected = false; // Input not connected
+        nodes[i].is_output_connected = false; // Output not connected
+
+        // Setup main square VAO/VBO
+        glGenVertexArrays(1, &nodes[i].vao);
+        glGenBuffers(1, &nodes[i].vbo);
+        glBindVertexArray(nodes[i].vao);
+        glBindBuffer(GL_ARRAY_BUFFER, nodes[i].vbo);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(float) * 4 * 3, NULL, GL_DYNAMIC_DRAW);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+        glEnableVertexAttribArray(0);
+
+        // Setup input rectangle VAO/VBO
+        glGenVertexArrays(1, &nodes[i].input_vao);
+        glGenBuffers(1, &nodes[i].input_vbo);
+        glBindVertexArray(nodes[i].input_vao);
+        glBindBuffer(GL_ARRAY_BUFFER, nodes[i].input_vbo);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(float) * 4 * 3, NULL, GL_DYNAMIC_DRAW);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+        glEnableVertexAttribArray(0);
+
+        // Setup output rectangle VAO/VBO
+        glGenVertexArrays(1, &nodes[i].output_vao);
+        glGenBuffers(1, &nodes[i].output_vbo);
+        glBindVertexArray(nodes[i].output_vao);
+        glBindBuffer(GL_ARRAY_BUFFER, nodes[i].output_vbo);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(float) * 4 * 3, NULL, GL_DYNAMIC_DRAW);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+        glEnableVertexAttribArray(0);
+    }
+
+    // Setup line VAO/VBO
+    glGenVertexArrays(1, &line_vao);
+    glGenBuffers(1, &line_vbo);
+    glBindVertexArray(line_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, line_vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(float) * 2 * 3, NULL, GL_DYNAMIC_DRAW);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+    glBindVertexArray(0);
+
+    // Initialize FreeType and text rendering
+    init_freetype();
+    init_text_opengl();
+}
+
+
+
+
+void update_node_vertices(int index) {
+    Node2D *node = &nodes[index];
+    // Update main square vertices
+    float square_vertices[] = {
+        node->x - node->width / 2.0f, node->y + node->height / 2.0f, 0.0f,
+        node->x + node->width / 2.0f, node->y + node->height / 2.0f, 0.0f,
+        node->x + node->width / 2.0f, node->y - node->height / 2.0f, 0.0f,
+        node->x - node->width / 2.0f, node->y - node->height / 2.0f, 0.0f
+    };
+    glBindBuffer(GL_ARRAY_BUFFER, node->vbo);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(square_vertices), square_vertices);
+
+    // Update input rectangle vertices
+    float input_vertices[] = {
+        node->input_x - node->io_width / 2.0f, node->input_y + node->io_height / 2.0f, 0.0f,
+        node->input_x + node->io_width / 2.0f, node->input_y + node->io_height / 2.0f, 0.0f,
+        node->input_x + node->io_width / 2.0f, node->input_y - node->io_height / 2.0f, 0.0f,
+        node->input_x - node->io_width / 2.0f, node->input_y - node->io_height / 2.0f, 0.0f
+    };
+    glBindBuffer(GL_ARRAY_BUFFER, node->input_vbo);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(input_vertices), input_vertices);
+
+    // Update output rectangle vertices
+    float output_vertices[] = {
+        node->output_x - node->io_width / 2.0f, node->output_y + node->io_height / 2.0f, 0.0f,
+        node->output_x + node->io_width / 2.0f, node->output_y + node->io_height / 2.0f, 0.0f,
+        node->output_x + node->io_width / 2.0f, node->output_y - node->io_height / 2.0f, 0.0f,
+        node->output_x - node->io_width / 2.0f, node->output_y - node->io_height / 2.0f, 0.0f
+    };
+    glBindBuffer(GL_ARRAY_BUFFER, node->output_vbo);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(output_vertices), output_vertices);
+}
+
+
+
+
+
+void update_square_vertices(void) {
+    float vertices[] = {
+        square_pos_x - 0.25f, square_pos_y + 0.25f, 0.0f, // Top-left
+        square_pos_x + 0.25f, square_pos_y + 0.25f, 0.0f, // Top-right
+        square_pos_x + 0.25f, square_pos_y - 0.25f, 0.0f, // Bottom-right
+        square_pos_x - 0.25f, square_pos_y - 0.25f, 0.0f  // Bottom-left
+    };
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(vertices), vertices);
+}
+
+
+// Function to render text
+void render_text(const char *text, float x, float y, float scale, float color[3]) {
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    // Set up orthographic projection
+    int win_w, win_h;
+    SDL_GetWindowSize(window, &win_w, &win_h);
+    float projection[16] = {
+        2.0f / win_w, 0.0f, 0.0f, 0.0f,
+        0.0f, -2.0f / win_h, 0.0f, 0.0f,
+        0.0f, 0.0f, -1.0f, 0.0f,
+        -1.0f, 1.0f, 0.0f, 1.0f
+    };
+
+    glUseProgram(text_shader_program);
+    glUniform3f(glGetUniformLocation(text_shader_program, "textColor"), color[0], color[1], color[2]);
+    glUniformMatrix4fv(glGetUniformLocation(text_shader_program, "projection"), 1, GL_FALSE, projection);
+    glActiveTexture(GL_TEXTURE0);
+    glBindVertexArray(text_vao);
+
+    // Iterate through all characters
+    for (const char *c = text; *c; c++) {
+        Character ch = characters[(unsigned char)*c];
+
+        float xpos = x + ch.bearing_x * scale;
+        float ypos = y - ch.bearing_y * scale; // Align to top
+        float w = ch.width * scale;
+        float h = ch.height * scale;
+
+        // Update VBO for each character (flipped texture coordinates)
+        float vertices[6][4] = {
+            { xpos,     ypos + h, 0.0f, 1.0f }, // Top-left
+            { xpos,     ypos,     0.0f, 0.0f }, // Bottom-left
+            { xpos + w, ypos,     1.0f, 0.0f }, // Bottom-right
+            { xpos,     ypos + h, 0.0f, 1.0f }, // Top-left
+            { xpos + w, ypos,     1.0f, 0.0f }, // Bottom-right
+            { xpos + w, ypos + h, 1.0f, 1.0f }  // Top-right
+        };
+
+        // Render glyph texture
+        glBindTexture(GL_TEXTURE_2D, ch.texture_id);
+        glBindBuffer(GL_ARRAY_BUFFER, text_vbo);
+        glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(vertices), vertices);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+
+        // Advance cursor
+        x += (ch.advance >> 6) * scale; // Bitshift by 6 to get value in pixels
+    }
+
+    glBindVertexArray(0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glDisable(GL_BLEND);
+}
+
+
 
 int main(int argc, char *argv[]) {
-    printf("SDL3 freetype\n");
     if (!SDL_Init(SDL_INIT_VIDEO)) {
-        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Couldn't initialize SDL: %s", SDL_GetError());
+        printf("SDL init failed: %s\n", SDL_GetError());
         return 1;
     }
 
-    printf("TTF_Init\n");
-    if (!TTF_Init()) {
-        SDL_Log("TTF_Init failed: %s", SDL_GetError());
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+
+    window = SDL_CreateWindow("SDL3 GLAD Square", 800, 600, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
+    if (!window) {
+        printf("Window creation failed: %s\n", SDL_GetError());
         SDL_Quit();
         return 1;
     }
 
-    printf("SDL_CreateWindowAndRenderer\n");
-    if (!SDL_CreateWindowAndRenderer("Node2D Editor Test", 800, 600, SDL_WINDOW_RESIZABLE, &window, &renderer)) {
-        printf("Window/Renderer failed: %s\n", SDL_GetError());
-        TTF_Quit();
-        SDL_Quit();
-        return 1;
-    }
-
-    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
-    SDL_SetHint(SDL_HINT_RENDER_DRIVER, "opengl");
-
-    const char *renderer_name = SDL_GetRendererName(renderer);
-    if (renderer_name) {
-        printf("Current Renderer: %s\n", renderer_name);
-    } else {
-        printf("Failed to get renderer name: %s\n", SDL_GetError());
-    }
-
-    printf("TTF_OpenFont\n");
-    font = TTF_OpenFont("Kenney Mini.ttf", 16);
-    if (!font) {
-        printf("Font load failed: %s\n", SDL_GetError());
-        SDL_DestroyRenderer(renderer);
+    gl_context = SDL_GL_CreateContext(window);
+    if (!gl_context) {
+        printf("GL context creation failed: %s\n", SDL_GetError());
         SDL_DestroyWindow(window);
-        TTF_Quit();
         SDL_Quit();
         return 1;
     }
 
-    // Initialize test nodes
-    num_nodes = 2;
-    init_node(&nodes[0], 280.0f, 200.0f, "Node 1", 2, 1); // 2 inputs, 1 output
-    init_node(&nodes[1], 300.0f, 100.0f, "Node 2", 1, 2); // 1 input, 2 outputs
-    for (int i = 0; i < num_nodes; i++) {
-        create_node_textures(&nodes[i]);
-    }
+    init_opengl();
 
-    // Main loop
+
+
     bool running = true;
-    Node *dragged_node = NULL;
-    float mouse_x = 0.0f, mouse_y = 0.0f;
-    while (running) {
-        SDL_Event event;
-        while (SDL_PollEvent(&event)) {
-            switch (event.type) {
-            case SDL_EVENT_QUIT:
-                running = false;
-                break;
-            case SDL_EVENT_MOUSE_BUTTON_DOWN:
-                if (event.button.button == SDL_BUTTON_LEFT) {
-                    float mx = (float)event.button.x;
-                    float my = (float)event.button.y;
-                    if (!is_connecting) {
-                        for (int i = 0; i < num_nodes; i++) {
-                            for (int j = 0; j < nodes[i].num_outputs; j++) {
-                                if (is_point_in_output_port(&nodes[i], j, mx, my)) {
-                                    is_connecting = true;
-                                    start_node_idx = i;
-                                    start_port_idx = j;
-                                    connect_start_x = (nodes[i].x + 115.0f + view_x) * zoom;
-                                    connect_start_y = (nodes[i].y + 35.0f + j * 20.0f + view_y) * zoom;
-                                    printf("Start connection from Node %d, Output %d\n", i, j);
-                                    break;
+while (running) {
+    SDL_Event event;
+    while (SDL_PollEvent(&event)) {
+        if (event.type == SDL_EVENT_QUIT) {
+            running = false;
+        }
+        if (event.type == SDL_EVENT_WINDOW_RESIZED) {
+            glViewport(0, 0, event.window.data1, event.window.data2);
+        }
+        if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
+            if (event.button.button == SDL_BUTTON_LEFT) {
+                int win_w, win_h;
+                SDL_GetWindowSize(window, &win_w, &win_h);
+                float mouse_x = (2.0f * event.button.x / win_w) - 1.0f;
+                float mouse_y = 1.0f - (2.0f * event.button.y / win_h);
+
+                // Check for dragging (main square only)
+                for (int i = 0; i < node_count; i++) {
+                    if (mouse_x >= nodes[i].x - nodes[i].width / 2.0f &&
+                        mouse_x <= nodes[i].x + nodes[i].width / 2.0f &&
+                        mouse_y >= nodes[i].y - nodes[i].height / 2.0f &&
+                        mouse_y <= nodes[i].y + nodes[i].height / 2.0f) {
+                        is_dragging = true;
+                        dragging_node = i;
+                        drag_offset_x = nodes[i].x - mouse_x;
+                        drag_offset_y = nodes[i].y - mouse_y;
+                        break;
+                    }
+                }
+
+                // Check for connection start, disconnection, or completion
+                if (!is_dragging) {
+                    for (int i = 0; i < node_count; i++) {
+                        // Check input rectangle
+                        if (mouse_x >= nodes[i].input_x - nodes[i].io_width / 2.0f &&
+                            mouse_x <= nodes[i].input_x + nodes[i].io_width / 2.0f &&
+                            mouse_y >= nodes[i].input_y - nodes[i].io_height / 2.0f &&
+                            mouse_y <= nodes[i].input_y + nodes[i].io_height / 2.0f) {
+                            if (nodes[i].is_input_connected) {
+                                // Disconnect input
+                                int target_node = nodes[i].connected_to;
+                                if (target_node != -1) {
+                                    nodes[target_node].is_output_connected = false;
                                 }
+                                nodes[i].connected_to = -1;
+                                nodes[i].is_input_connected = false;
+                                is_connecting = false;
+                                connecting_node = -1;
+                                is_connecting_from_output = false;
+                            } else if (is_connecting && is_connecting_from_output && i != connecting_node &&
+                                       !nodes[i].is_input_connected) {
+                                // Complete connection from output to input
+                                nodes[i].connected_to = connecting_node;
+                                nodes[i].is_input_connected = true;
+                                nodes[connecting_node].is_output_connected = true;
+                                is_connecting = false;
+                                connecting_node = -1;
+                                is_connecting_from_output = false;
+                            } else if (!is_connecting && !nodes[i].is_input_connected) {
+                                // Start connecting from input
+                                is_connecting = true;
+                                connecting_node = i;
+                                is_connecting_from_output = false;
+                                connecting_x = nodes[i].input_x;
+                                connecting_y = nodes[i].input_y;
                             }
-                            if (is_connecting) break;
+                            break;
                         }
-                    }
-                    if (is_connecting) {
-                        for (int i = 0; i < num_nodes; i++) {
-                            for (int j = 0; j < nodes[i].num_inputs; j++) {
-                                if (is_point_in_input_port(&nodes[i], j, mx, my)) {
-                                    // NEW: Validate connection
-                                    if (start_node_idx != i && // Prevent self-connection
-                                        !has_existing_connection_to_input(i, j)) { // Prevent multiple connections to input
-                                        if (num_connections < MAX_CONNECTIONS) {
-                                            connections[num_connections++] = (Connection){
-                                                start_node_idx, start_port_idx, i, j
-                                            };
-                                            printf("Connected Node %d, Output %d to Node %d, Input %d\n",
-                                                start_node_idx, start_port_idx, i, j);
-                                        }
-                                    } else {
-                                        printf("Invalid connection: Self-connection or input already connected\n");
-                                    }
-                                    is_connecting = false;
-                                    start_node_idx = -1;
-                                    start_port_idx = -1;
-                                    break;
-                                }
-                            }
-                            if (!is_connecting) break;
-                        }
-                    }
-                    if (!is_connecting && !dragged_node) {
-                        for (int i = num_nodes - 1; i >= 0; i--) {
-                            if (is_point_in_node(&nodes[i], mx, my)) {
-                                dragged_node = &nodes[i];
-                                dragged_node->is_dragging = true;
-                                dragged_node->drag_offset_x = (mx / zoom - view_x) - nodes[i].x;
-                                dragged_node->drag_offset_y = (my / zoom - view_y) - nodes[i].y;
-                                printf("Dragging %s at (%f, %f), offset (%f, %f)\n",
-                                        nodes[i].name, mx, my,
-                                        dragged_node->drag_offset_x, dragged_node->drag_offset_y);
-                                break;
-                            }
-                        }
-                    }
-                } else if (event.button.button == SDL_BUTTON_RIGHT) {
-                    float mx = (float)event.button.x;
-                    float my = (float)event.button.y;
-                    bool near_input = false;
-                    for (int i = 0; i < num_nodes; i++) {
-                        for (int j = 0; j < nodes[i].num_inputs; j++) {
-                            if (is_point_in_input_port(&nodes[i], j, mx, my)) {
-                                near_input = true;
-                                for (int k = 0; k < num_connections; k++) {
-                                    if (connections[k].input_node_idx == i &&
-                                        connections[k].input_port_idx == j) {
-                                        connections[k] = connections[--num_connections];
-                                        printf("Disconnected input %d from Node %d\n", j, i);
+                        // Check output rectangle
+                        if (mouse_x >= nodes[i].output_x - nodes[i].io_width / 2.0f &&
+                            mouse_x <= nodes[i].output_x + nodes[i].io_width / 2.0f &&
+                            mouse_y >= nodes[i].output_y - nodes[i].io_height / 2.0f &&
+                            mouse_y <= nodes[i].output_y + nodes[i].io_height / 2.0f) {
+                            if (nodes[i].is_output_connected) {
+                                // Disconnect output
+                                for (int j = 0; j < node_count; j++) {
+                                    if (nodes[j].connected_to == i) {
+                                        nodes[j].connected_to = -1;
+                                        nodes[j].is_input_connected = false;
                                         break;
                                     }
                                 }
-                                break;
+                                nodes[i].is_output_connected = false;
+                                is_connecting = false;
+                                connecting_node = -1;
+                                is_connecting_from_output = false;
+                            } else if (!is_connecting && !nodes[i].is_output_connected) {
+                                // Start connecting from output
+                                is_connecting = true;
+                                connecting_node = i;
+                                is_connecting_from_output = true;
+                                connecting_x = nodes[i].output_x;
+                                connecting_y = nodes[i].output_y;
+                            } else if (is_connecting && !is_connecting_from_output && i != connecting_node &&
+                                       !nodes[i].is_output_connected) {
+                                // Complete connection from input to output
+                                nodes[connecting_node].connected_to = i;
+                                nodes[connecting_node].is_input_connected = true;
+                                nodes[i].is_output_connected = true;
+                                is_connecting = false;
+                                connecting_node = -1;
+                                is_connecting_from_output = false;
                             }
-                        }
-                        if (near_input) break;
-                    }
-                    // NEW: Delete node if clicked on node body
-                    if (!near_input) {
-                        for (int i = num_nodes - 1; i >= 0; i--) {
-                            if (is_point_in_node(&nodes[i], mx, my)) {
-                                delete_node(i);
-                                break;
-                            }
+                            break;
                         }
                     }
-                    // NEW: Create new node only if not deleting
-                    if (!near_input && num_nodes < MAX_NODES) {
-                        char name[32];
-                        snprintf(name, sizeof(name), "Node %d", num_nodes + 1);
-                        init_node(&nodes[num_nodes], mx / zoom - view_x, my / zoom - view_y, name, 1, 1);
-                        create_node_textures(&nodes[num_nodes]);
-                        printf("Added %s at (%f, %f)\n", name, mx / zoom - view_x, my / zoom - view_y);
-                        num_nodes++;
+                }
+
+                // Cancel connection if clicking elsewhere
+                if (is_connecting && !is_dragging) {
+                    bool hit_input_or_output = false;
+                    for (int i = 0; i < node_count; i++) {
+                        if ((mouse_x >= nodes[i].input_x - nodes[i].io_width / 2.0f &&
+                             mouse_x <= nodes[i].input_x + nodes[i].io_width / 2.0f &&
+                             mouse_y >= nodes[i].input_y - nodes[i].io_height / 2.0f &&
+                             mouse_y <= nodes[i].input_y + nodes[i].io_height / 2.0f) ||
+                            (mouse_x >= nodes[i].output_x - nodes[i].io_width / 2.0f &&
+                             mouse_x <= nodes[i].output_x + nodes[i].io_width / 2.0f &&
+                             mouse_y >= nodes[i].output_y - nodes[i].io_height / 2.0f &&
+                             mouse_y <= nodes[i].output_y + nodes[i].io_height / 2.0f)) {
+                            hit_input_or_output = true;
+                            break;
+                        }
                     }
-                } else if (event.button.button == SDL_BUTTON_MIDDLE) {
-                    is_panning = true;
-                    pan_start_x = (float)event.button.x;
-                    pan_start_y = (float)event.button.y;
-                }
-                break;
-            case SDL_EVENT_MOUSE_BUTTON_UP:
-                if (event.button.button == SDL_BUTTON_LEFT) {
-                    if (dragged_node) {
-                        printf("Finished dragging %s\n", dragged_node->name);
-                        dragged_node->is_dragging = false;
-                        dragged_node = NULL;
+                    if (!hit_input_or_output) {
+                        is_connecting = false;
+                        connecting_node = -1;
+                        is_connecting_from_output = false;
                     }
-                } else if (event.button.button == SDL_BUTTON_MIDDLE) {
-                    is_panning = false;
                 }
-                break;
-            case SDL_EVENT_MOUSE_MOTION:
-                mouse_x = (float)event.motion.x;
-                mouse_y = (float)event.motion.y;
-                if (dragged_node) {
-                    update_node_position(dragged_node, mouse_x, mouse_y);
-                    printf("Dragging %s to (%f, %f), new pos (%f, %f)\n",
-                           dragged_node->name, mouse_x, mouse_y,
-                           dragged_node->x, dragged_node->y);
-                }
-                if (is_panning) {
-                    view_x += (mouse_x - pan_start_x) / zoom;
-                    view_y += (mouse_y - pan_start_y) / zoom;
-                    pan_start_x = mouse_x;
-                    pan_start_y = mouse_y;
-                }
-                break;
-            case SDL_EVENT_MOUSE_WHEEL:
-                if (event.wheel.y != 0) {
-                    float old_zoom = zoom;
-                    zoom += event.wheel.y * 0.1f;
-                    zoom = SDL_clamp(zoom, 0.5f, 2.0f); // Min 0.5, max 2.0
-                    view_x = mouse_x / zoom - (mouse_x / old_zoom - view_x);
-                    view_y = mouse_y / zoom - (mouse_y / old_zoom - view_y);
-                    printf("Zoom: %f\n", zoom);
-                }
-                break;
             }
         }
-
-        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
-        SDL_RenderClear(renderer);
-
-        // Draw connections
-        draw_connections();
-
-        // Draw active connection line
-        if (is_connecting) {
-            SDL_SetRenderDrawColor(renderer, 255, 255, 0, 255);
-            SDL_RenderLine(renderer, connect_start_x, connect_start_y, mouse_x, mouse_y);
+        if (event.type == SDL_EVENT_MOUSE_BUTTON_UP) {
+            if (event.button.button == SDL_BUTTON_LEFT) {
+                is_dragging = false;
+                dragging_node = -1;
+            }
         }
+        if (event.type == SDL_EVENT_MOUSE_MOTION && is_dragging) {
+            int win_w, win_h;
+            SDL_GetWindowSize(window, &win_w, &win_h);
+            float mouse_x = (2.0f * event.motion.x / win_w) - 1.0f;
+            float mouse_y = 1.0f - (2.0f * event.motion.y / win_h);
+            nodes[dragging_node].x = mouse_x + drag_offset_x;
+            nodes[dragging_node].y = mouse_y + drag_offset_y;
+            nodes[dragging_node].input_x = nodes[dragging_node].x - nodes[dragging_node].width / 2.0f - nodes[dragging_node].io_width / 2.0f;
+            nodes[dragging_node].input_y = nodes[dragging_node].y;
+            nodes[dragging_node].output_x = nodes[dragging_node].x + nodes[dragging_node].width / 2.0f + nodes[dragging_node].io_width / 2.0f;
+            nodes[dragging_node].output_y = nodes[dragging_node].y;
+            update_node_vertices(dragging_node);
+        }
+        if (event.type == SDL_EVENT_MOUSE_MOTION && is_connecting) {
+            int win_w, win_h;
+            SDL_GetWindowSize(window, &win_w, &win_h);
+            connecting_x = (2.0f * event.motion.x / win_w) - 1.0f;
+            connecting_y = 1.0f - (2.0f * event.motion.y / win_h);
+        }
+    }
 
-        // Render nodes
-        for (int i = 0; i < num_nodes; i++) {
-            // Transform vertices for rendering
-            SDL_Vertex transformed[4];
-            for (int j = 0; j < 4; j++) {
-                transformed[j] = nodes[i].vertices[j];
-                transformed[j].position.x = (transformed[j].position.x + view_x) * zoom;
-                transformed[j].position.y = (transformed[j].position.y + view_y) * zoom;
-            }
-            SDL_RenderGeometry(renderer, NULL, transformed, 4, indices, 6);
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
 
-            if (nodes[i].is_dragging) {
-                draw_debug_rect(&nodes[i]);
-            }
-            SDL_FRect name_dest = {
-                (nodes[i].x + 10.0f + view_x) * zoom,
-                (nodes[i].y + 10.0f + view_y) * zoom,
-                0.0f, 0.0f
+    // Draw all nodes
+    glUseProgram(shader_program);
+    GLint color_loc = glGetUniformLocation(shader_program, "color");
+    for (int i = 0; i < node_count; i++) {
+        update_node_vertices(i); // Ensure vertices are up-to-date
+        // Draw main square (blue)
+        glUniform3f(color_loc, 0.0f, 0.0f, 1.0f);
+        glBindVertexArray(nodes[i].vao);
+        glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+        glBindVertexArray(0);
+
+        // Draw input rectangle (green)
+        glUniform3f(color_loc, 0.0f, 1.0f, 0.0f);
+        glBindVertexArray(nodes[i].input_vao);
+        glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+        glBindVertexArray(0);
+
+        // Draw output rectangle (red)
+        glUniform3f(color_loc, 1.0f, 0.0f, 0.0f);
+        glBindVertexArray(nodes[i].output_vao);
+        glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+        glBindVertexArray(0);
+    }
+
+    // Draw connections
+    glUseProgram(line_shader_program);
+    glBindVertexArray(line_vao);
+    for (int i = 0; i < node_count; i++) {
+        if (nodes[i].connected_to != -1) {
+            float line_vertices[] = {
+                nodes[i].input_x, nodes[i].input_y, 0.0f,
+                nodes[nodes[i].connected_to].output_x, nodes[nodes[i].connected_to].output_y, 0.0f
             };
-            SDL_GetTextureSize(nodes[i].name_texture, &name_dest.w, &name_dest.h);
-            name_dest.w *= zoom;
-            name_dest.h *= zoom;
-            SDL_RenderTexture(renderer, nodes[i].name_texture, NULL, &name_dest);
-            for (int j = 0; j < nodes[i].num_inputs; j++) {
-                SDL_FRect input_dest = {
-                    (nodes[i].x - 10.0f + view_x) * zoom,
-                    (nodes[i].y + 30.0f + j * 20.0f + view_y) * zoom,
-                    0.0f, 0.0f
-                };
-                SDL_GetTextureSize(nodes[i].input_textures[j], &input_dest.w, &input_dest.h);
-                input_dest.w *= zoom;
-                input_dest.h *= zoom;
-                SDL_RenderTexture(renderer, nodes[i].input_textures[j], NULL, &input_dest);
-            }
-            for (int j = 0; j < nodes[i].num_outputs; j++) {
-                SDL_FRect output_dest = {
-                    (nodes[i].x + 90.0f + view_x) * zoom,
-                    (nodes[i].y + 30.0f + j * 20.0f + view_y) * zoom,
-                    0.0f, 0.0f
-                };
-                SDL_GetTextureSize(nodes[i].output_textures[j], &output_dest.w, &output_dest.h);
-                output_dest.w *= zoom;
-                output_dest.h *= zoom;
-                SDL_RenderTexture(renderer, nodes[i].output_textures[j], NULL, &output_dest);
-            }
-            draw_port_squares(&nodes[i]);
+            glBindBuffer(GL_ARRAY_BUFFER, line_vbo);
+            glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(line_vertices), line_vertices);
+            glDrawArrays(GL_LINES, 0, 2);
         }
-
-        SDL_RenderPresent(renderer);
     }
-
-    // Cleanup
-    for (int i = 0; i < num_nodes; i++) {
-        destroy_node(&nodes[i]);
+    if (is_connecting) {
+        float line_vertices[] = {
+            is_connecting_from_output ? nodes[connecting_node].output_x : nodes[connecting_node].input_x,
+            is_connecting_from_output ? nodes[connecting_node].output_y : nodes[connecting_node].input_y,
+            0.0f,
+            connecting_x, connecting_y, 0.0f
+        };
+        glBindBuffer(GL_ARRAY_BUFFER, line_vbo);
+        glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(line_vertices), line_vertices);
+        glDrawArrays(GL_LINES, 0, 2);
     }
-    TTF_CloseFont(font);
-    SDL_DestroyRenderer(renderer);
+    glBindVertexArray(0);
+
+    // Render "Hello World" at top-left
+    float text_color[3] = {1.0f, 1.0f, 1.0f};
+    render_text("Hello World", 50.0f, 50.0f, 1.0f, text_color);
+
+    SDL_GL_SwapWindow(window);
+}
+
+    // Clean up FreeType resources
+    for (int i = 0; i < 128; i++) {
+        glDeleteTextures(1, &characters[i].texture_id);
+    }
+    FT_Done_Face(face);
+    FT_Done_FreeType(ft);
+
+    // Clean up FreeType resources
+    for (int i = 0; i < 128; i++) {
+        glDeleteTextures(1, &characters[i].texture_id);
+    }
+    FT_Done_Face(face);
+    FT_Done_FreeType(ft);
+
+    // Clean up FreeType resources
+    for (int i = 0; i < 128; i++) {
+        glDeleteTextures(1, &characters[i].texture_id);
+    }
+    FT_Done_Face(face);
+    FT_Done_FreeType(ft);
+
+    // Clean up OpenGL resources
+    for (int i = 0; i < node_count; i++) {
+        glDeleteVertexArrays(1, &nodes[i].vao);
+        glDeleteBuffers(1, &nodes[i].vbo);
+        glDeleteVertexArrays(1, &nodes[i].input_vao);
+        glDeleteBuffers(1, &nodes[i].input_vbo);
+        glDeleteVertexArrays(1, &nodes[i].output_vao);
+        glDeleteBuffers(1, &nodes[i].output_vbo);
+    }
+    glDeleteVertexArrays(1, &line_vao);
+    glDeleteBuffers(1, &line_vbo);
+    glDeleteProgram(shader_program);
+    glDeleteProgram(line_shader_program);
+    glDeleteVertexArrays(1, &text_vao);
+    glDeleteBuffers(1, &text_vbo);
+    glDeleteProgram(text_shader_program);
+    SDL_GL_DestroyContext(gl_context);
     SDL_DestroyWindow(window);
-    TTF_Quit();
     SDL_Quit();
     return 0;
 }
