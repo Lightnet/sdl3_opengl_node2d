@@ -40,7 +40,9 @@ sdl3_opengl_node2d/
     - [ ] Yellow lines indicate active connections during creation.
 - Static Linking: SDL3, SDL_ttf, and FreeType are statically linked to avoid DLL dependencies.
 - Cross-Platform Build: Configured with CMake for MinGW-w64, adaptable to other platforms.
-    
+
+    Does not have variables and functions. Just a simple node 2D with the connectors. 
+
 
 # Goals
 - Provide a minimal, working example of SDL3 and SDL_ttf for interactive 2D graphics.
