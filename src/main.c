@@ -19,6 +19,7 @@ typedef struct {
     int connected_to; // Index of Node2D this node's input is connected to (-1 if none)
     bool is_input_connected; // True if input is connected
     bool is_output_connected; // True if output is connected
+    char name[16]; // Name of the node (e.g., "Node 0")
 } Node2D;
 
 #define MAX_NODES 10
@@ -299,6 +300,7 @@ void init_opengl(void) {
         nodes[i].connected_to = -1; // No initial connection
         nodes[i].is_input_connected = false; // Input not connected
         nodes[i].is_output_connected = false; // Output not connected
+        snprintf(nodes[i].name, sizeof(nodes[i].name), "Node %d", i); // Set node name
 
         // Setup main square VAO/VBO
         glGenVertexArrays(1, &nodes[i].vao);
@@ -480,227 +482,234 @@ int main(int argc, char *argv[]) {
     init_opengl();
 
 
-
     bool running = true;
-while (running) {
-    SDL_Event event;
-    while (SDL_PollEvent(&event)) {
-        if (event.type == SDL_EVENT_QUIT) {
-            running = false;
-        }
-        if (event.type == SDL_EVENT_WINDOW_RESIZED) {
-            glViewport(0, 0, event.window.data1, event.window.data2);
-        }
-        if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
-            if (event.button.button == SDL_BUTTON_LEFT) {
+    while (running) {
+        SDL_Event event;
+        while (SDL_PollEvent(&event)) {
+            if (event.type == SDL_EVENT_QUIT) {
+                running = false;
+            }
+            if (event.type == SDL_EVENT_WINDOW_RESIZED) {
+                glViewport(0, 0, event.window.data1, event.window.data2);
+            }
+            if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
+                if (event.button.button == SDL_BUTTON_LEFT) {
+                    int win_w, win_h;
+                    SDL_GetWindowSize(window, &win_w, &win_h);
+                    float mouse_x = (2.0f * event.button.x / win_w) - 1.0f;
+                    float mouse_y = 1.0f - (2.0f * event.button.y / win_h);
+
+                    // Check for dragging (main square only)
+                    for (int i = 0; i < node_count; i++) {
+                        if (mouse_x >= nodes[i].x - nodes[i].width / 2.0f &&
+                            mouse_x <= nodes[i].x + nodes[i].width / 2.0f &&
+                            mouse_y >= nodes[i].y - nodes[i].height / 2.0f &&
+                            mouse_y <= nodes[i].y + nodes[i].height / 2.0f) {
+                            is_dragging = true;
+                            dragging_node = i;
+                            drag_offset_x = nodes[i].x - mouse_x;
+                            drag_offset_y = nodes[i].y - mouse_y;
+                            break;
+                        }
+                    }
+
+                    // Check for connection start, disconnection, or completion
+                    if (!is_dragging) {
+                        for (int i = 0; i < node_count; i++) {
+                            // Check input rectangle
+                            if (mouse_x >= nodes[i].input_x - nodes[i].io_width / 2.0f &&
+                                mouse_x <= nodes[i].input_x + nodes[i].io_width / 2.0f &&
+                                mouse_y >= nodes[i].input_y - nodes[i].io_height / 2.0f &&
+                                mouse_y <= nodes[i].input_y + nodes[i].io_height / 2.0f) {
+                                if (nodes[i].is_input_connected) {
+                                    // Disconnect input
+                                    int target_node = nodes[i].connected_to;
+                                    if (target_node != -1) {
+                                        nodes[target_node].is_output_connected = false;
+                                    }
+                                    nodes[i].connected_to = -1;
+                                    nodes[i].is_input_connected = false;
+                                    is_connecting = false;
+                                    connecting_node = -1;
+                                    is_connecting_from_output = false;
+                                } else if (is_connecting && is_connecting_from_output && i != connecting_node &&
+                                        !nodes[i].is_input_connected) {
+                                    // Complete connection from output to input
+                                    nodes[i].connected_to = connecting_node;
+                                    nodes[i].is_input_connected = true;
+                                    nodes[connecting_node].is_output_connected = true;
+                                    is_connecting = false;
+                                    connecting_node = -1;
+                                    is_connecting_from_output = false;
+                                } else if (!is_connecting && !nodes[i].is_input_connected) {
+                                    // Start connecting from input
+                                    is_connecting = true;
+                                    connecting_node = i;
+                                    is_connecting_from_output = false;
+                                    connecting_x = nodes[i].input_x;
+                                    connecting_y = nodes[i].input_y;
+                                }
+                                break;
+                            }
+                            // Check output rectangle
+                            if (mouse_x >= nodes[i].output_x - nodes[i].io_width / 2.0f &&
+                                mouse_x <= nodes[i].output_x + nodes[i].io_width / 2.0f &&
+                                mouse_y >= nodes[i].output_y - nodes[i].io_height / 2.0f &&
+                                mouse_y <= nodes[i].output_y + nodes[i].io_height / 2.0f) {
+                                if (nodes[i].is_output_connected) {
+                                    // Disconnect output
+                                    for (int j = 0; j < node_count; j++) {
+                                        if (nodes[j].connected_to == i) {
+                                            nodes[j].connected_to = -1;
+                                            nodes[j].is_input_connected = false;
+                                            break;
+                                        }
+                                    }
+                                    nodes[i].is_output_connected = false;
+                                    is_connecting = false;
+                                    connecting_node = -1;
+                                    is_connecting_from_output = false;
+                                } else if (!is_connecting && !nodes[i].is_output_connected) {
+                                    // Start connecting from output
+                                    is_connecting = true;
+                                    connecting_node = i;
+                                    is_connecting_from_output = true;
+                                    connecting_x = nodes[i].output_x;
+                                    connecting_y = nodes[i].output_y;
+                                } else if (is_connecting && !is_connecting_from_output && i != connecting_node &&
+                                        !nodes[i].is_output_connected) {
+                                    // Complete connection from input to output
+                                    nodes[connecting_node].connected_to = i;
+                                    nodes[connecting_node].is_input_connected = true;
+                                    nodes[i].is_output_connected = true;
+                                    is_connecting = false;
+                                    connecting_node = -1;
+                                    is_connecting_from_output = false;
+                                }
+                                break;
+                            }
+                        }
+                    }
+
+                    // Cancel connection if clicking elsewhere
+                    if (is_connecting && !is_dragging) {
+                        bool hit_input_or_output = false;
+                        for (int i = 0; i < node_count; i++) {
+                            if ((mouse_x >= nodes[i].input_x - nodes[i].io_width / 2.0f &&
+                                mouse_x <= nodes[i].input_x + nodes[i].io_width / 2.0f &&
+                                mouse_y >= nodes[i].input_y - nodes[i].io_height / 2.0f &&
+                                mouse_y <= nodes[i].input_y + nodes[i].io_height / 2.0f) ||
+                                (mouse_x >= nodes[i].output_x - nodes[i].io_width / 2.0f &&
+                                mouse_x <= nodes[i].output_x + nodes[i].io_width / 2.0f &&
+                                mouse_y >= nodes[i].output_y - nodes[i].io_height / 2.0f &&
+                                mouse_y <= nodes[i].output_y + nodes[i].io_height / 2.0f)) {
+                                hit_input_or_output = true;
+                                break;
+                            }
+                        }
+                        if (!hit_input_or_output) {
+                            is_connecting = false;
+                            connecting_node = -1;
+                            is_connecting_from_output = false;
+                        }
+                    }
+                }
+            }
+            if (event.type == SDL_EVENT_MOUSE_BUTTON_UP) {
+                if (event.button.button == SDL_BUTTON_LEFT) {
+                    is_dragging = false;
+                    dragging_node = -1;
+                }
+            }
+            if (event.type == SDL_EVENT_MOUSE_MOTION && is_dragging) {
                 int win_w, win_h;
                 SDL_GetWindowSize(window, &win_w, &win_h);
-                float mouse_x = (2.0f * event.button.x / win_w) - 1.0f;
-                float mouse_y = 1.0f - (2.0f * event.button.y / win_h);
-
-                // Check for dragging (main square only)
-                for (int i = 0; i < node_count; i++) {
-                    if (mouse_x >= nodes[i].x - nodes[i].width / 2.0f &&
-                        mouse_x <= nodes[i].x + nodes[i].width / 2.0f &&
-                        mouse_y >= nodes[i].y - nodes[i].height / 2.0f &&
-                        mouse_y <= nodes[i].y + nodes[i].height / 2.0f) {
-                        is_dragging = true;
-                        dragging_node = i;
-                        drag_offset_x = nodes[i].x - mouse_x;
-                        drag_offset_y = nodes[i].y - mouse_y;
-                        break;
-                    }
-                }
-
-                // Check for connection start, disconnection, or completion
-                if (!is_dragging) {
-                    for (int i = 0; i < node_count; i++) {
-                        // Check input rectangle
-                        if (mouse_x >= nodes[i].input_x - nodes[i].io_width / 2.0f &&
-                            mouse_x <= nodes[i].input_x + nodes[i].io_width / 2.0f &&
-                            mouse_y >= nodes[i].input_y - nodes[i].io_height / 2.0f &&
-                            mouse_y <= nodes[i].input_y + nodes[i].io_height / 2.0f) {
-                            if (nodes[i].is_input_connected) {
-                                // Disconnect input
-                                int target_node = nodes[i].connected_to;
-                                if (target_node != -1) {
-                                    nodes[target_node].is_output_connected = false;
-                                }
-                                nodes[i].connected_to = -1;
-                                nodes[i].is_input_connected = false;
-                                is_connecting = false;
-                                connecting_node = -1;
-                                is_connecting_from_output = false;
-                            } else if (is_connecting && is_connecting_from_output && i != connecting_node &&
-                                       !nodes[i].is_input_connected) {
-                                // Complete connection from output to input
-                                nodes[i].connected_to = connecting_node;
-                                nodes[i].is_input_connected = true;
-                                nodes[connecting_node].is_output_connected = true;
-                                is_connecting = false;
-                                connecting_node = -1;
-                                is_connecting_from_output = false;
-                            } else if (!is_connecting && !nodes[i].is_input_connected) {
-                                // Start connecting from input
-                                is_connecting = true;
-                                connecting_node = i;
-                                is_connecting_from_output = false;
-                                connecting_x = nodes[i].input_x;
-                                connecting_y = nodes[i].input_y;
-                            }
-                            break;
-                        }
-                        // Check output rectangle
-                        if (mouse_x >= nodes[i].output_x - nodes[i].io_width / 2.0f &&
-                            mouse_x <= nodes[i].output_x + nodes[i].io_width / 2.0f &&
-                            mouse_y >= nodes[i].output_y - nodes[i].io_height / 2.0f &&
-                            mouse_y <= nodes[i].output_y + nodes[i].io_height / 2.0f) {
-                            if (nodes[i].is_output_connected) {
-                                // Disconnect output
-                                for (int j = 0; j < node_count; j++) {
-                                    if (nodes[j].connected_to == i) {
-                                        nodes[j].connected_to = -1;
-                                        nodes[j].is_input_connected = false;
-                                        break;
-                                    }
-                                }
-                                nodes[i].is_output_connected = false;
-                                is_connecting = false;
-                                connecting_node = -1;
-                                is_connecting_from_output = false;
-                            } else if (!is_connecting && !nodes[i].is_output_connected) {
-                                // Start connecting from output
-                                is_connecting = true;
-                                connecting_node = i;
-                                is_connecting_from_output = true;
-                                connecting_x = nodes[i].output_x;
-                                connecting_y = nodes[i].output_y;
-                            } else if (is_connecting && !is_connecting_from_output && i != connecting_node &&
-                                       !nodes[i].is_output_connected) {
-                                // Complete connection from input to output
-                                nodes[connecting_node].connected_to = i;
-                                nodes[connecting_node].is_input_connected = true;
-                                nodes[i].is_output_connected = true;
-                                is_connecting = false;
-                                connecting_node = -1;
-                                is_connecting_from_output = false;
-                            }
-                            break;
-                        }
-                    }
-                }
-
-                // Cancel connection if clicking elsewhere
-                if (is_connecting && !is_dragging) {
-                    bool hit_input_or_output = false;
-                    for (int i = 0; i < node_count; i++) {
-                        if ((mouse_x >= nodes[i].input_x - nodes[i].io_width / 2.0f &&
-                             mouse_x <= nodes[i].input_x + nodes[i].io_width / 2.0f &&
-                             mouse_y >= nodes[i].input_y - nodes[i].io_height / 2.0f &&
-                             mouse_y <= nodes[i].input_y + nodes[i].io_height / 2.0f) ||
-                            (mouse_x >= nodes[i].output_x - nodes[i].io_width / 2.0f &&
-                             mouse_x <= nodes[i].output_x + nodes[i].io_width / 2.0f &&
-                             mouse_y >= nodes[i].output_y - nodes[i].io_height / 2.0f &&
-                             mouse_y <= nodes[i].output_y + nodes[i].io_height / 2.0f)) {
-                            hit_input_or_output = true;
-                            break;
-                        }
-                    }
-                    if (!hit_input_or_output) {
-                        is_connecting = false;
-                        connecting_node = -1;
-                        is_connecting_from_output = false;
-                    }
-                }
+                float mouse_x = (2.0f * event.motion.x / win_w) - 1.0f;
+                float mouse_y = 1.0f - (2.0f * event.motion.y / win_h);
+                nodes[dragging_node].x = mouse_x + drag_offset_x;
+                nodes[dragging_node].y = mouse_y + drag_offset_y;
+                nodes[dragging_node].input_x = nodes[dragging_node].x - nodes[dragging_node].width / 2.0f - nodes[dragging_node].io_width / 2.0f;
+                nodes[dragging_node].input_y = nodes[dragging_node].y;
+                nodes[dragging_node].output_x = nodes[dragging_node].x + nodes[dragging_node].width / 2.0f + nodes[dragging_node].io_width / 2.0f;
+                nodes[dragging_node].output_y = nodes[dragging_node].y;
+                update_node_vertices(dragging_node);
+            }
+            if (event.type == SDL_EVENT_MOUSE_MOTION && is_connecting) {
+                int win_w, win_h;
+                SDL_GetWindowSize(window, &win_w, &win_h);
+                connecting_x = (2.0f * event.motion.x / win_w) - 1.0f;
+                connecting_y = 1.0f - (2.0f * event.motion.y / win_h);
             }
         }
-        if (event.type == SDL_EVENT_MOUSE_BUTTON_UP) {
-            if (event.button.button == SDL_BUTTON_LEFT) {
-                is_dragging = false;
-                dragging_node = -1;
+
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        // Draw all nodes
+        glUseProgram(shader_program);
+        GLint color_loc = glGetUniformLocation(shader_program, "color");
+        for (int i = 0; i < node_count; i++) {
+            update_node_vertices(i); // Ensure vertices are up-to-date
+            // Draw main square (blue)
+            glUniform3f(color_loc, 0.0f, 0.0f, 1.0f);
+            glBindVertexArray(nodes[i].vao);
+            glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+            glBindVertexArray(0);
+
+            // Draw input rectangle (green)
+            glUniform3f(color_loc, 0.0f, 1.0f, 0.0f);
+            glBindVertexArray(nodes[i].input_vao);
+            glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+            glBindVertexArray(0);
+
+            // Draw output rectangle (red)
+            glUniform3f(color_loc, 1.0f, 0.0f, 0.0f);
+            glBindVertexArray(nodes[i].output_vao);
+            glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+            glBindVertexArray(0);
+        }
+
+        // Draw connections
+        glUseProgram(line_shader_program);
+        glBindVertexArray(line_vao);
+        for (int i = 0; i < node_count; i++) {
+            if (nodes[i].connected_to != -1) {
+                float line_vertices[] = {
+                    nodes[i].input_x, nodes[i].input_y, 0.0f,
+                    nodes[nodes[i].connected_to].output_x, nodes[nodes[i].connected_to].output_y, 0.0f
+                };
+                glBindBuffer(GL_ARRAY_BUFFER, line_vbo);
+                glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(line_vertices), line_vertices);
+                glDrawArrays(GL_LINES, 0, 2);
             }
         }
-        if (event.type == SDL_EVENT_MOUSE_MOTION && is_dragging) {
-            int win_w, win_h;
-            SDL_GetWindowSize(window, &win_w, &win_h);
-            float mouse_x = (2.0f * event.motion.x / win_w) - 1.0f;
-            float mouse_y = 1.0f - (2.0f * event.motion.y / win_h);
-            nodes[dragging_node].x = mouse_x + drag_offset_x;
-            nodes[dragging_node].y = mouse_y + drag_offset_y;
-            nodes[dragging_node].input_x = nodes[dragging_node].x - nodes[dragging_node].width / 2.0f - nodes[dragging_node].io_width / 2.0f;
-            nodes[dragging_node].input_y = nodes[dragging_node].y;
-            nodes[dragging_node].output_x = nodes[dragging_node].x + nodes[dragging_node].width / 2.0f + nodes[dragging_node].io_width / 2.0f;
-            nodes[dragging_node].output_y = nodes[dragging_node].y;
-            update_node_vertices(dragging_node);
-        }
-        if (event.type == SDL_EVENT_MOUSE_MOTION && is_connecting) {
-            int win_w, win_h;
-            SDL_GetWindowSize(window, &win_w, &win_h);
-            connecting_x = (2.0f * event.motion.x / win_w) - 1.0f;
-            connecting_y = 1.0f - (2.0f * event.motion.y / win_h);
-        }
-    }
-
-    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT);
-
-    // Draw all nodes
-    glUseProgram(shader_program);
-    GLint color_loc = glGetUniformLocation(shader_program, "color");
-    for (int i = 0; i < node_count; i++) {
-        update_node_vertices(i); // Ensure vertices are up-to-date
-        // Draw main square (blue)
-        glUniform3f(color_loc, 0.0f, 0.0f, 1.0f);
-        glBindVertexArray(nodes[i].vao);
-        glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
-        glBindVertexArray(0);
-
-        // Draw input rectangle (green)
-        glUniform3f(color_loc, 0.0f, 1.0f, 0.0f);
-        glBindVertexArray(nodes[i].input_vao);
-        glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
-        glBindVertexArray(0);
-
-        // Draw output rectangle (red)
-        glUniform3f(color_loc, 1.0f, 0.0f, 0.0f);
-        glBindVertexArray(nodes[i].output_vao);
-        glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
-        glBindVertexArray(0);
-    }
-
-    // Draw connections
-    glUseProgram(line_shader_program);
-    glBindVertexArray(line_vao);
-    for (int i = 0; i < node_count; i++) {
-        if (nodes[i].connected_to != -1) {
+        if (is_connecting) {
             float line_vertices[] = {
-                nodes[i].input_x, nodes[i].input_y, 0.0f,
-                nodes[nodes[i].connected_to].output_x, nodes[nodes[i].connected_to].output_y, 0.0f
+                is_connecting_from_output ? nodes[connecting_node].output_x : nodes[connecting_node].input_x,
+                is_connecting_from_output ? nodes[connecting_node].output_y : nodes[connecting_node].input_y,
+                0.0f,
+                connecting_x, connecting_y, 0.0f
             };
             glBindBuffer(GL_ARRAY_BUFFER, line_vbo);
             glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(line_vertices), line_vertices);
             glDrawArrays(GL_LINES, 0, 2);
         }
-    }
-    if (is_connecting) {
-        float line_vertices[] = {
-            is_connecting_from_output ? nodes[connecting_node].output_x : nodes[connecting_node].input_x,
-            is_connecting_from_output ? nodes[connecting_node].output_y : nodes[connecting_node].input_y,
-            0.0f,
-            connecting_x, connecting_y, 0.0f
-        };
-        glBindBuffer(GL_ARRAY_BUFFER, line_vbo);
-        glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(line_vertices), line_vertices);
-        glDrawArrays(GL_LINES, 0, 2);
-    }
-    glBindVertexArray(0);
+        glBindVertexArray(0);
 
-    // Render "Hello World" at top-left
-    float text_color[3] = {1.0f, 1.0f, 1.0f};
-    render_text("Hello World", 50.0f, 50.0f, 1.0f, text_color);
+        // Render node names and "Hello World"
+        float text_color[3] = {1.0f, 1.0f, 1.0f};
+        for (int i = 0; i < node_count; i++) {
+            // Convert NDC to pixel coordinates for text positioning
+            int win_w, win_h;
+            SDL_GetWindowSize(window, &win_w, &win_h);
+            float pixel_x = (nodes[i].x - nodes[i].width / 2.0f + 1.0f) * win_w / 2.0f + 10.0f; // Offset slightly inside square
+            float pixel_y = (1.0f - (nodes[i].y + nodes[i].height / 2.0f)) * win_h / 2.0f + 10.0f; // Top-left of square
+            render_text(nodes[i].name, pixel_x, pixel_y, 0.5f, text_color); // Smaller scale for node names
+        }
+        render_text("Hello World", 50.0f, 50.0f, 1.0f, text_color);
 
-    SDL_GL_SwapWindow(window);
-}
+        SDL_GL_SwapWindow(window);
+    }
 
     // Clean up FreeType resources
     for (int i = 0; i < 128; i++) {
