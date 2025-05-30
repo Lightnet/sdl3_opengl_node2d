@@ -5,10 +5,12 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <string.h>
+#include <math.h>
 
 #define MAX_NODES 10
 #define MAX_PORTS 20 // Cap on inputs and outputs per node
 #define MAX_CONNECTIONS 50 // Max connections to prevent overflow
+#define GRID_SIZE 20.0f // NEW: Grid size for snapping
 
 /* We will use this renderer to draw into this window every frame. */
 static SDL_Window *window = NULL;
@@ -55,8 +57,9 @@ static float pan_start_x, pan_start_y;
 
 /* Initialize a node */
 void init_node(Node *node, float x, float y, const char *name, int num_inputs, int num_outputs) {
-    node->x = x;
-    node->y = y;
+    // NEW: Snap position to grid
+    node->x = roundf(x / GRID_SIZE) * GRID_SIZE;
+    node->y = roundf(y / GRID_SIZE) * GRID_SIZE;
     strncpy(node->name, name, sizeof(node->name) - 1);
     node->name[sizeof(node->name) - 1] = '\0';
     node->num_inputs = SDL_min(num_inputs, MAX_PORTS);
@@ -71,10 +74,10 @@ void init_node(Node *node, float x, float y, const char *name, int num_inputs, i
     float g = blue.g / 255.0f;
     float b = blue.b / 255.0f;
     float a = blue.a / 255.0f;
-    node->vertices[0] = (SDL_Vertex){{x, y}, {r, g, b, a}, {0.0f, 0.0f}};           // Top-left
-    node->vertices[1] = (SDL_Vertex){{x + 100.0f, y}, {r, g, b, a}, {1.0f, 0.0f}}; // Top-right
-    node->vertices[2] = (SDL_Vertex){{x + 100.0f, y + 100.0f}, {r, g, b, a}, {1.0f, 1.0f}}; // Bottom-right
-    node->vertices[3] = (SDL_Vertex){{x, y + 100.0f}, {r, g, b, a}, {0.0f, 1.0f}}; // Bottom-left
+    node->vertices[0] = (SDL_Vertex){{node->x, node->y}, {r, g, b, a}, {0.0f, 0.0f}};           // Top-left
+    node->vertices[1] = (SDL_Vertex){{node->x + 100.0f, node->y}, {r, g, b, a}, {1.0f, 0.0f}}; // Top-right
+    node->vertices[2] = (SDL_Vertex){{node->x + 100.0f, node->y + 100.0f}, {r, g, b, a}, {1.0f, 1.0f}}; // Bottom-right
+    node->vertices[3] = (SDL_Vertex){{node->x, node->y + 100.0f}, {r, g, b, a}, {0.0f, 1.0f}}; // Bottom-left
 }
 
 /* Check if a point is inside a node (adjusted for view and zoom) */
@@ -100,11 +103,25 @@ bool is_point_in_input_port(const Node *node, int port_idx, float mx, float my) 
     return mx >= x && mx <= x + 10.0f * zoom && my >= y && my <= y + 10.0f * zoom;
 }
 
+/* NEW: Check if a connection to an input port already exists */
+bool has_existing_connection_to_input(int input_node_idx, int input_port_idx) {
+    for (int i = 0; i < num_connections; i++) {
+        if (connections[i].input_node_idx == input_node_idx &&
+            connections[i].input_port_idx == input_port_idx) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /* Update node position during drag */
 void update_node_position(Node *node, float mx, float my) {
     // Adjust mouse position for view and zoom
     node->x = (mx / zoom - view_x) - node->drag_offset_x;
     node->y = (my / zoom - view_y) - node->drag_offset_y;
+    // NEW: Snap to grid
+    node->x = roundf(node->x / GRID_SIZE) * GRID_SIZE;
+    node->y = roundf(node->y / GRID_SIZE) * GRID_SIZE;
     // Update vertices
     node->vertices[0].position.x = node->x;
     node->vertices[0].position.y = node->y;
@@ -151,6 +168,31 @@ void destroy_node(Node *node) {
     for (int i = 0; i < node->num_outputs; i++) {
         if (node->output_textures[i]) SDL_DestroyTexture(node->output_textures[i]);
     }
+}
+
+/* NEW: Delete a node and its connections */
+void delete_node(int node_idx) {
+    if (node_idx < 0 || node_idx >= num_nodes) return;
+    // Remove associated connections
+    int i = 0;
+    while (i < num_connections) {
+        if (connections[i].input_node_idx == node_idx || connections[i].output_node_idx == node_idx) {
+            connections[i] = connections[--num_connections];
+        } else {
+            // Adjust connection indices if nodes after node_idx shift
+            if (connections[i].input_node_idx > node_idx) connections[i].input_node_idx--;
+            if (connections[i].output_node_idx > node_idx) connections[i].output_node_idx--;
+            i++;
+        }
+    }
+    // Clean up node resources
+    destroy_node(&nodes[node_idx]);
+    // Shift remaining nodes
+    for (int j = node_idx; j < num_nodes - 1; j++) {
+        nodes[j] = nodes[j + 1];
+    }
+    num_nodes--;
+    printf("Deleted Node %d\n", node_idx + 1);
 }
 
 /* Draw debug rectangle for node */
@@ -207,6 +249,7 @@ int main(int argc, char *argv[]) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Couldn't initialize SDL: %s", SDL_GetError());
         return 1;
     }
+
     printf("TTF_Init\n");
     if (!TTF_Init()) {
         SDL_Log("TTF_Init failed: %s", SDL_GetError());
@@ -215,7 +258,7 @@ int main(int argc, char *argv[]) {
     }
 
     printf("SDL_CreateWindowAndRenderer\n");
-    if (!SDL_CreateWindowAndRenderer("Node Editor Test", 800, 600, SDL_WINDOW_RESIZABLE, &window, &renderer)) {
+    if (!SDL_CreateWindowAndRenderer("Node2D Editor Test", 800, 600, SDL_WINDOW_RESIZABLE, &window, &renderer)) {
         printf("Window/Renderer failed: %s\n", SDL_GetError());
         TTF_Quit();
         SDL_Quit();
@@ -223,6 +266,14 @@ int main(int argc, char *argv[]) {
     }
 
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+    SDL_SetHint(SDL_HINT_RENDER_DRIVER, "opengl");
+
+    const char *renderer_name = SDL_GetRendererName(renderer);
+    if (renderer_name) {
+        printf("Current Renderer: %s\n", renderer_name);
+    } else {
+        printf("Failed to get renderer name: %s\n", SDL_GetError());
+    }
 
     printf("TTF_OpenFont\n");
     font = TTF_OpenFont("Kenney Mini.ttf", 16);
@@ -278,12 +329,18 @@ int main(int argc, char *argv[]) {
                         for (int i = 0; i < num_nodes; i++) {
                             for (int j = 0; j < nodes[i].num_inputs; j++) {
                                 if (is_point_in_input_port(&nodes[i], j, mx, my)) {
-                                    if (num_connections < MAX_CONNECTIONS) {
-                                        connections[num_connections++] = (Connection){
-                                            start_node_idx, start_port_idx, i, j
-                                        };
-                                        printf("Connected Node %d, Output %d to Node %d, Input %d\n",
-                                            start_node_idx, start_port_idx, i, j);
+                                    // NEW: Validate connection
+                                    if (start_node_idx != i && // Prevent self-connection
+                                        !has_existing_connection_to_input(i, j)) { // Prevent multiple connections to input
+                                        if (num_connections < MAX_CONNECTIONS) {
+                                            connections[num_connections++] = (Connection){
+                                                start_node_idx, start_port_idx, i, j
+                                            };
+                                            printf("Connected Node %d, Output %d to Node %d, Input %d\n",
+                                                start_node_idx, start_port_idx, i, j);
+                                        }
+                                    } else {
+                                        printf("Invalid connection: Self-connection or input already connected\n");
                                     }
                                     is_connecting = false;
                                     start_node_idx = -1;
@@ -329,6 +386,16 @@ int main(int argc, char *argv[]) {
                         }
                         if (near_input) break;
                     }
+                    // NEW: Delete node if clicked on node body
+                    if (!near_input) {
+                        for (int i = num_nodes - 1; i >= 0; i--) {
+                            if (is_point_in_node(&nodes[i], mx, my)) {
+                                delete_node(i);
+                                break;
+                            }
+                        }
+                    }
+                    // NEW: Create new node only if not deleting
                     if (!near_input && num_nodes < MAX_NODES) {
                         char name[32];
                         snprintf(name, sizeof(name), "Node %d", num_nodes + 1);

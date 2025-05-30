@@ -4,10 +4,10 @@
 
 # Project Overview
 
-sdl3_node2d is a sample project demonstrating a 2D node-based editor using SDL3, SDL_ttf, and FreeType. It renders a graphical interface with the "Kenney Mini" font and supports interactive node manipulation. Built for Windows using the MSYS2/MinGW-w64 environment, it serves as a foundation for developing node-based graphical applications, such as visual scripting or dataflow editors. The project uses SDL3’s software rendering for simplicity and portability.
+sdl3_opengl_node2d is a sample project demonstrating a 2D node-based editor using SDL3, SDL_ttf, and FreeType. It renders a graphical interface with the "Kenney Mini" font and supports interactive node manipulation. Built for Windows using the MSYS2/MinGW-w64 environment, it serves as a foundation for developing node-based graphical applications, such as visual scripting or dataflow editors. The project uses SDL3’s software rendering for simplicity and portability.
 
 ```text
-sdl3_node2d/
+sdl3_opengl_node2d/
 ├── CMakeLists.txt
 ├── Kenney Mini.ttf
 ├── src/
@@ -97,13 +97,13 @@ Setup Instructions
         bash
         ```bash
         git clone <repository-url>
-        cd sdl3_node2d
+        cd sdl3_opengl_node2d
         ```
         
     - Or download and extract the project ZIP, then navigate to the directory in the MSYS2 terminal.
         
 4. Ensure Font File:
-    - Verify that Kenney Mini.ttf is in the project root directory (sdl3_node2d/Kenney Mini.ttf).
+    - Verify that Kenney Mini.ttf is in the project root directory (sdl3_opengl_node2d/Kenney Mini.ttf).
         
 5. Build the Project:
     - Create a build directory and run CMake:
@@ -131,14 +131,14 @@ Setup Instructions
         endlocal
         ```
         
-    - This generates the executable in build/src/sdl3_node2d.exe.
+    - This generates the executable in build/src/sdl3_node2d_editor.exe.
         
 6. Run the Application:
     - From the build directory:
         
         bash
         ```bash
-        ./src/sdl3_node2d.exe
+        build/sdl3_node2d_editor.exe
         ```
         
     - Or double-click run.bat if it’s configured to run the executable.

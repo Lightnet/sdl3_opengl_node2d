@@ -45,6 +45,22 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(sdl_ttf)
 
+# Add GLAD manually
+# https://gen.glad.sh/
+    # - Generator: c
+    # - API: gl=3.3
+    # - Profile: Core
+    # - Options
+    #     - Generate a loader: Checked
+add_library(glad STATIC 
+    ${CMAKE_SOURCE_DIR}/glad/src/gl.c
+)
+target_include_directories(glad PUBLIC 
+    ${CMAKE_SOURCE_DIR}/glad/include
+)
+
+
+
 set(APP_NAME sdl3_node2d_editor)
 
 add_executable(${APP_NAME} src/main.c)
@@ -56,12 +72,20 @@ target_link_libraries(${APP_NAME} PRIVATE
     SDL3::SDL3
     SDL3_ttf::SDL3_ttf
     freetype
+    glad
 )
+
+if(WIN32)
+    target_link_libraries(${APP_NAME} PRIVATE opengl32)
+else()
+    target_link_libraries(${APP_NAME} PRIVATE GL)
+endif()
 
 target_include_directories(${APP_NAME} PRIVATE 
     ${freetype_SOURCE_DIR}/include
     ${SDL3_SOURCE_DIR}/include
     ${sdl_ttf_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/glad/include
 )
 
 set_property(TARGET ${APP_NAME} PROPERTY C_STANDARD 11)
